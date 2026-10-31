@@ -31,7 +31,9 @@ import time
 from collections import deque
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(HERE, "config.json")
+# Інсталятор задає ESP32_LOCATOR_CONFIG (~/.config/esp32-locator/config.json);
+# без нього config.json лежить поруч із програмою.
+CONFIG_PATH = os.environ.get("ESP32_LOCATOR_CONFIG") or os.path.join(HERE, "config.json")
 
 DEFAULT_CONFIG = {
     "serial_port": "auto",
@@ -79,6 +81,7 @@ def load_config(path):
 
 
 def save_config(path, cfg):
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
