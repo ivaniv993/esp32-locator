@@ -6,6 +6,8 @@ import sys
 import time
 
 from .config import CONFIG_PATH, load_config, save_config
+from .evaluate import (collect_paths, compare, evaluate_files, format_report, load_baseline,
+                       save_baseline)
 from .gui import run_gui
 from .protocol import norm_mac
 from .readings import Readings
@@ -60,6 +62,29 @@ def record(cfg, args):
         print("Пакетів не отримано — порожній файл видалено.")
     else:
         print(f"Збережено {path}: {writer.count} пакетів за {writer.duration:.0f} с.")
+
+
+def evaluate(cfg, args):
+    """Прогін алгоритму по записах без екрана і приймача: похибки відносно справжнього положення.
+    Код виходу 1, якщо результат гірший за --baseline."""
+    paths = collect_paths(args.evaluate)
+    if not paths:
+        sys.exit("Записів не знайдено.")
+    try:
+        results = evaluate_files(paths, cfg)
+        baseline = load_baseline(args.baseline) if args.baseline else None
+    except (OSError, ValueError) as e:
+        sys.exit(f"Помилка: {e}")
+    print(format_report(results, cfg))
+    verdict = None
+    if baseline:
+        text, verdict = compare(results, cfg, baseline)
+        print(f"\nПорівняння з {args.baseline}:\n{text}")
+    if args.save:
+        save_baseline(args.save, results, cfg)
+        print(f"\nРезультати збережено: {args.save}")
+    if verdict == "гірше":
+        sys.exit(1)
 
 
 def replay(cfg, args):
@@ -127,6 +152,9 @@ def main():
     g.add_argument("--calibrate", action="store_true", help="режим калібрування")
     g.add_argument("--record", action="store_true", help="записати сесію (потрібен --truth X Y)")
     g.add_argument("--replay", metavar="FILE", help="відтворити записану сесію замість приймача")
+    g.add_argument("--evaluate", nargs="+", metavar="FILE", help="оцінити алгоритм на записах (файли або папка)")
+    ap.add_argument("--baseline", metavar="JSON", help="--evaluate: порівняти з раніше збереженим результатом")
+    ap.add_argument("--save", metavar="JSON", help="--evaluate: зберегти результат для наступних порівнянь")
     ap.add_argument("--truth", nargs=2, metavar=("X", "Y"), help="де стоїть приймач під час --record, м")
     ap.add_argument("--note", help="коментар до запису (--record)")
     ap.add_argument("--out", metavar="DIR", help="папка для записів (за замовчуванням recordings_dir)")
@@ -176,6 +204,8 @@ def main():
         record(cfg, args)
     elif args.replay:
         replay(cfg, args)
+    elif args.evaluate:
+        evaluate(cfg, args)
     else:
         readings = Readings(cfg["window_sec"])
         reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"])
