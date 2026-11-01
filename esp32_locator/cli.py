@@ -1,6 +1,7 @@
-"""Командний рядок: реєстрація маяків, калібрування, запуск екрана."""
+"""Командний рядок: реєстрація маяків, калібрування, запис і відтворення сесій, запуск екрана."""
 import argparse
 import glob
+import os
 import sys
 import time
 
@@ -8,8 +9,72 @@ from .config import CONFIG_PATH, load_config, save_config
 from .gui import run_gui
 from .protocol import norm_mac
 from .readings import Readings
+from .session import (SessionWriter, default_recordings_dir, load_session, make_header,
+                      new_session_path, session_config)
 from .solver import distance_from_loss
-from .sources import SerialReader
+from .sources import ReplaySource, SerialReader
+
+
+def parse_xy(pair):
+    """['2,5', '1'] -> (2.5, 1.0); sys.exit з поясненням, якщо це не числа."""
+    try:
+        return float(pair[0].replace(",", ".")), float(pair[1].replace(",", "."))
+    except ValueError:
+        sys.exit("Координати мають бути числами, наприклад 2.5")
+
+
+def record(cfg, args):
+    """Записує сесію: пакети від приймача + справжні положення маяків і приймача (він стоїть на місці)."""
+    if not args.truth:
+        sys.exit("Вкажіть, де стоїть приймач: --record --truth X Y  (метри, від кута (0, 0) мапи)")
+    if not cfg["transmitters"]:
+        sys.exit("Немає зареєстрованих маяків. Додайте: locator.py --add ID X Y")
+    truth = parse_xy(args.truth)
+    aw, ah = cfg["area"]["width"], cfg["area"]["height"]
+    if not (0 <= truth[0] <= aw and 0 <= truth[1] <= ah):
+        sys.exit(f"Приймач ({truth[0]}; {truth[1]}) поза зоною {aw} × {ah} м (параметр area у config.json)")
+    if len(cfg["transmitters"]) < 3:
+        print("Увага: маяків менше 3 — за таким записом положення не визначити.")
+
+    directory = args.out or default_recordings_dir(cfg)
+    path = new_session_path(directory)
+    writer = SessionWriter(path, make_header(cfg, truth, args.note or ""))
+    readings = Readings(cfg["window_sec"])
+    reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
+                          on_line=writer.write_rx)
+    reader.start()
+    print(f"Запис у {path}\nПриймач: ({truth[0]}; {truth[1]}) м, маяків: {len(cfg['transmitters'])}. Ctrl+C або Q — зупинити.")
+    try:
+        if args.headless:
+            while True:
+                time.sleep(5)
+                print(f"[{reader.status}]  пакетів: {writer.count}  ({writer.duration:.0f} с)")
+        else:
+            run_gui(cfg, None, readings, reader, truth=truth, banner=f"● Запис: {os.path.basename(path)}")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        writer.close()
+    if writer.count == 0:
+        os.remove(path)
+        print("Пакетів не отримано — порожній файл видалено.")
+    else:
+        print(f"Збережено {path}: {writer.count} пакетів за {writer.duration:.0f} с.")
+
+
+def replay(cfg, args):
+    """Демо-режим: екран працює на записаній сесії замість приймача."""
+    try:
+        session = load_session(args.replay)
+    except (OSError, ValueError) as e:
+        sys.exit(f"Не вдалося прочитати запис: {e}")
+    rcfg = session_config(cfg, session)
+    readings = Readings(rcfg["window_sec"])
+    source = ReplaySource(session, readings, rcfg["default_tx_power_dbm"], loop=args.loop)
+    source.start()
+    note = session.header.get("note")
+    banner = f"▶ {os.path.basename(args.replay)}" + (f" — {note}" if note else "")
+    run_gui(rcfg, None, readings, source, truth=session.truth, banner=banner)
 
 
 def calibrate(cfg):
@@ -60,6 +125,13 @@ def main():
     g.add_argument("--remove", metavar="ID", help="видалити маяк")
     g.add_argument("--list", action="store_true", help="показати маяки")
     g.add_argument("--calibrate", action="store_true", help="режим калібрування")
+    g.add_argument("--record", action="store_true", help="записати сесію (потрібен --truth X Y)")
+    g.add_argument("--replay", metavar="FILE", help="відтворити записану сесію замість приймача")
+    ap.add_argument("--truth", nargs=2, metavar=("X", "Y"), help="де стоїть приймач під час --record, м")
+    ap.add_argument("--note", help="коментар до запису (--record)")
+    ap.add_argument("--out", metavar="DIR", help="папка для записів (за замовчуванням recordings_dir)")
+    ap.add_argument("--headless", action="store_true", help="--record без екрана (наприклад, по ssh)")
+    ap.add_argument("--loop", action="store_true", help="--replay по колу")
     ap.add_argument("--name", help="назва маяка для --add")
     g.add_argument("--ports", action="store_true", help="показати послідовні порти цієї плати")
     ap.add_argument("--port", help="порт приймача, наприклад /dev/ttyUSB0 або /dev/ttyS5")
@@ -73,10 +145,7 @@ def main():
         mac = norm_mac(args.add[0])
         if not mac:
             sys.exit("Неправильний ID. Приклад: A1B2C3D4E5F6")
-        try:
-            x, y = float(args.add[1].replace(",", ".")), float(args.add[2].replace(",", "."))
-        except ValueError:
-            sys.exit("Координати мають бути числами, наприклад 2.5")
+        x, y = parse_xy(args.add[1:])
         tx = next((t for t in cfg["transmitters"] if t["mac"] == mac), None)
         if tx:
             tx.update(x=x, y=y)
@@ -103,5 +172,12 @@ def main():
         list_ports()
     elif args.calibrate:
         calibrate(cfg)
+    elif args.record:
+        record(cfg, args)
+    elif args.replay:
+        replay(cfg, args)
     else:
-        run_gui(cfg, args.config)
+        readings = Readings(cfg["window_sec"])
+        reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"])
+        reader.start()
+        run_gui(cfg, args.config, readings, reader)

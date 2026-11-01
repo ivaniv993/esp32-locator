@@ -19,6 +19,7 @@ DEFAULT_CONFIG = {
     "window_sec": 3.0,                             # маяк шле 2 пакети/с — беремо медіану за 3 с
     "smoothing": 0.35,
     "fullscreen": False,
+    "recordings_dir": "auto",                      # куди --record пише сесії (auto — recordings/ у репо)
     "transmitters": [],
 }
 

@@ -10,10 +10,11 @@ from .protocol import parse_line
 class SerialReader(threading.Thread):
     """Читає приймач у фоні, сам знаходить порт і перепідключається."""
 
-    def __init__(self, port, baud, readings, default_txp=14):
+    def __init__(self, port, baud, readings, default_txp=14, on_line=None):
         super().__init__(daemon=True)
         self.port, self.baud, self.readings = port, baud, readings
         self.default_txp = default_txp
+        self.on_line = on_line        # викликається з сирим рядком кожного розпізнаного виміру (для запису)
         self.status = "Пошук приймача…"
 
     def candidates(self):
@@ -64,4 +65,36 @@ class SerialReader(threading.Thread):
         if not got:
             return False
         self.readings.add(*got)
+        if self.on_line:
+            self.on_line(line)
         return True
+
+
+class ReplaySource(threading.Thread):
+    """Відтворює запис у реальному часі, ніби це живий приймач (той самий інтерфейс, що й SerialReader)."""
+
+    def __init__(self, session, readings, default_txp=14, loop=False):
+        super().__init__(daemon=True)
+        self.session, self.readings = session, readings
+        self.default_txp, self.loop = default_txp, loop
+        self.name_ = os.path.basename(session.path)
+        self.status = f"Відтворення: {self.name_}"
+
+    def run(self):
+        total = self.session.duration
+        if not self.session.rx:
+            self.status = f"У записі немає пакетів: {self.name_}"
+            return
+        while True:
+            start = time.monotonic()
+            for t, line in self.session.rx:
+                delay = start + t - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                got = parse_line(line, self.default_txp)
+                if got:
+                    self.readings.add(*got)
+                self.status = f"Відтворення: {self.name_}  {t:.0f}/{total:.0f} с"
+            if not self.loop:
+                self.status = f"Відтворення завершено: {self.name_}"
+                return

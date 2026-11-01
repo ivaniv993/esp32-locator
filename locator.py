@@ -15,10 +15,12 @@
     python3 locator.py --add ID X Y --name A    — зареєструвати / оновити маяк
     python3 locator.py --remove ID              — видалити маяк
     python3 locator.py --calibrate              — режим калібрування
+    python3 locator.py --record --truth X Y     — записати сесію (приймач стоїть у точці X, Y)
+    python3 locator.py --replay FILE            — відтворити запис замість приймача
 Клавіші на екрані: F — повний екран, C — очистити слід, Q або Esc — вихід.
 Незареєстрований маяк: торкніться його ID у списку, потім місця на мапі.
 
-Уся логіка — у пакеті esp32_locator/ (config, protocol, sources, readings, solver, gui, cli).
+Уся логіка — у пакеті esp32_locator/ (config, protocol, sources, readings, session, solver, gui, cli).
 """
 from esp32_locator.cli import main
 

@@ -4,9 +4,7 @@ import time
 from collections import deque
 
 from .config import save_config
-from .readings import Readings
 from .solver import Locator
-from .sources import SerialReader
 
 BG = (14, 21, 34)
 PAPER = (22, 32, 50)
@@ -17,6 +15,7 @@ MUTED = (150, 165, 184)
 TX = (63, 196, 204)
 EST = (255, 111, 156)
 WARN = (240, 179, 90)
+TRUTH = (124, 222, 134)
 
 
 def fmt(v, n=2):
@@ -27,13 +26,15 @@ def mix(c1, c2, t):
     return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
 
 
-def run_gui(cfg, cfg_path):
+def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
+    """readings і reader (потік із полем status) створює і запускає викликач.
+    cfg_path=None — режим перегляду: маяки не можна реєструвати з екрана (запис, відтворення).
+    truth — справжнє положення приймача (x, y): малюється на мапі разом із похибкою.
+    banner — рядок угорі мапи (наприклад, «● Запис»)."""
     import pygame
 
-    readings = Readings(cfg["window_sec"])
-    reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"])
-    reader.start()
     loc = Locator(cfg, readings)
+    editable = cfg_path is not None
 
     pygame.display.init()   # без звуку: аудіо не потрібне
     pygame.font.init()
@@ -89,7 +90,7 @@ def run_gui(cfg, cfg_path):
                     open_window()
                 if e.key == pygame.K_c:
                     trail.clear()
-            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and geo:
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and geo and editable:
                 hit = next((mac for mac, r in unknown_rects if r.collidepoint(e.pos)), None)
                 if hit:
                     selected = None if selected == hit else hit
@@ -180,12 +181,18 @@ def run_gui(cfg, cfg_path):
             pygame.draw.circle(screen, EST, c, 14, 3)
             pygame.draw.line(screen, EST, (c[0] - 20, c[1]), (c[0] + 20, c[1]), 2)
             pygame.draw.line(screen, EST, (c[0], c[1] - 20), (c[0], c[1] + 20), 2)
+        if truth:     # справжнє положення приймача (зі запису або з --truth)
+            c = P(*truth)
+            pygame.draw.rect(screen, TRUTH, (c[0] - 9, c[1] - 9, 18, 18), 2)
+            text(screen, "справжнє", f_small, TRUTH, (c[0], c[1] + 14), "midtop")
 
         if selected:
             text(screen, f"Клацніть на мапі, де стоїть {selected}   (Esc — скасувати)", f_txt, EST,
                  (map_rect.x + 16, map_rect.y + 6))
         elif msg and now - msg_t < 5:
             text(screen, msg, f_txt, TX, (map_rect.x + 16, map_rect.y + 6))
+        elif banner:
+            text(screen, banner, f_txt, TRUTH if truth else TX, (map_rect.x + 16, map_rect.y + 6))
 
         # --- панель
         pygame.draw.rect(screen, PAPER, panel)
@@ -195,6 +202,10 @@ def run_gui(cfg, cfg_path):
             text(screen, f"x = {fmt(loc.pos[0])} м", f_big, EST, (x, y)); y += 32
             text(screen, f"y = {fmt(loc.pos[1])} м", f_big, EST, (x, y)); y += 34
             text(screen, f"Узгодженість вимірів: ±{fmt(loc.rms, 1)} м", f_small, MUTED, (x, y)); y += 22
+            if truth:
+                err = math.hypot(loc.pos[0] - truth[0], loc.pos[1] - truth[1])
+                text(screen, f"Похибка: {fmt(err, 2)} м  (справжнє {fmt(truth[0], 1)}; {fmt(truth[1], 1)})",
+                     f_small, TRUTH, (x, y)); y += 22
         else:
             text(screen, "невідоме", f_big, MUTED, (x, y)); y += 40
         if loc.heard < 3:
@@ -227,7 +238,7 @@ def run_gui(cfg, cfg_path):
                 text(screen, mac, f_small, INK, (x, y)); y += 15
                 text(screen, f"{r['rssi']:.0f} дБм   ~{fmt(d, 1)} м", f_small, MUTED, (x, y)); y += 21
                 unknown_rects.append((mac, row))
-            if not selected:
+            if editable and not selected:
                 text(screen, "Торкніться ID, щоб розмістити на мапі", f_small, MUTED, (x, y + 2))
         by = panel.bottom - 16
         text(screen, "F — повний екран   C — очистити слід   Q — вихід", f_small, MUTED, (x, by), "bottomleft")
