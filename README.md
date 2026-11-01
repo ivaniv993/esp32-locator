@@ -38,7 +38,7 @@ A1B2C3D4E5F6,-67.5,9.2,14
 
 **UART.** TX приймача → RX Orange Pi, RX приймача → TX Orange Pi, GND → GND (рівні 3,3 В). Увімкніть потрібний UART через `orangepi-config` або `armbian-config` (System → Hardware). Назва порту залежить від моделі плати (`/dev/ttyS1`, `/dev/ttyS5` тощо). Один із цих портів зазвичай зайнятий системною консоллю, тому автопошук їх не перебирає. Вкажіть порт явно в `config.json` (`"serial_port": "/dev/ttyS5"`) або параметром `--port`. Список портів: `python3 locator.py --ports`.
 
-## Встановлення на Raspberry Pi
+## Встановлення
 
 ```bash
 git clone https://github.com/ivaniv993/esp32-locator.git
@@ -47,28 +47,18 @@ cd esp32-locator
 sudo reboot
 ```
 
-Скрипт сам:
+Працює на Raspberry Pi OS, Armbian та інших Debian/Ubuntu-похідних. Скрипт сам:
 - встановлює `python3-serial`, `python3-pygame` і шрифти;
 - копіює програму в `/opt/esp32-locator/` і створює команду `esp32-locator`;
 - створює налаштування в `~/.config/esp32-locator/config.json` (або переносить маяки зі старого ручного встановлення);
 - додає користувача до групи `dialout`;
 - вмикає автозапуск разом із робочим столом.
 
-Параметри: `--uart` — увімкнути UART `/dev/serial0` для приймача на GPIO (пін 8 — TX, пін 10 — RX); `--no-autostart` — без автозапуску; `--uninstall` — видалити програму (налаштування залишаться).
+Параметри: `--uart` — на Raspberry Pi увімкнути UART `/dev/serial0` для приймача на GPIO (пін 8 — TX, пін 10 — RX); `--no-autostart` — без автозапуску; `--uninstall` — видалити програму (налаштування залишаться).
 
 **Оновлення:** `git pull` у папці репозиторію і знову `./install-raspberry.sh`. Ваші маяки й калібрування не перезаписуються.
 
-На Raspberry Pi усі команди нижче запускаються як `esp32-locator …` замість `python3 locator.py …`.
-
-## Встановлення на Orange Pi
-
-```bash
-git clone https://github.com/ivaniv993/esp32-locator.git
-cd esp32-locator
-./install.sh              # або ./install.sh --autostart
-```
-
-Скрипт встановить `python3-serial`, `python3-pygame` і шрифти та додасть користувача до групи `dialout`. Після цього перезайдіть у систему.
+Після встановлення команди нижче можна запускати як `esp32-locator …` замість `python3 locator.py …`.
 
 ## Використання
 
@@ -116,6 +106,6 @@ LoRa розрахована на великі відстані. На кільк�
 ## Якщо не працює
 
 - **«Приймач не знайдено»** — кабель лише для заряджання, або для UART не вказано `serial_port`.
-- **Помилка доступу до порту** — не перезайшли після `install.sh` (група `dialout`).
+- **Помилка доступу до порту** — не перезайшли після встановлення (група `dialout`).
 - **Маяк у списку «Незареєстровані»** — ID при реєстрації введено з помилкою.
 - **Порожній екран калібрування** — перевірте приймач у моніторі порту: `python3 -m serial.tools.miniterm /dev/ttyUSB0 115200`.

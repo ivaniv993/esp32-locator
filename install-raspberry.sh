@@ -57,7 +57,7 @@ if [ ! -f "$SRC_DIR/locator.py" ]; then
   exit 1
 fi
 if ! grep -qi "raspberry" /proc/device-tree/model 2>/dev/null; then
-  echo "Увага: це, схоже, не Raspberry Pi. Продовжую, але для Orange Pi є install.sh."
+  echo "Увага: це, схоже, не Raspberry Pi. Продовжую — скрипт працює й на Armbian/Debian/Ubuntu."
 fi
 
 say "1/5  Встановлення залежностей"
