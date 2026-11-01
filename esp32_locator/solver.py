@@ -1,0 +1,91 @@
+"""Алгоритм визначення положення: втрати сигналу → відстані → трилатерація → згладжування."""
+import math
+
+
+def distance_from_loss(pl, cfg):
+    """Модель log-distance: втрати ростуть на (pl_10m − pl_1m) дБ при кожному 10-кратному збільшенні відстані."""
+    p1, p10 = cfg["signal"]["pl_1m"], cfg["signal"]["pl_10m"]
+    return 10 ** ((pl - p1) / max(1.0, p10 - p1))
+
+
+def solve(pts):
+    """pts: [(x, y, d)]. Зважений метод найменших квадратів (Левенберг–Марквардт).
+    Повертає (x, y, rms) — rms показує, наскільки виміри узгоджуються між собою."""
+    if not pts:
+        return None
+
+    def w(d):
+        return 1.0 / max(d, 0.3) ** 2
+
+    sw = sum(w(d) for _, _, d in pts)
+    x = sum(w(d) * px for px, _, d in pts) / sw
+    y = sum(w(d) * py for _, py, d in pts) / sw
+
+    def cost(cx, cy):
+        return sum(w(d) * (math.hypot(cx - px, cy - py) - d) ** 2 for px, py, d in pts)
+
+    if len(pts) > 1:
+        c, lam = cost(x, y), 1e-3
+        for _ in range(80):
+            a = b = cc = g1 = g2 = 0.0
+            for px, py, d in pts:
+                dx, dy = x - px, y - py
+                r = math.hypot(dx, dy) or 1e-6
+                wi, res, jx, jy = w(d), r - d, dx / r, dy / r
+                a += wi * jx * jx; b += wi * jx * jy; cc += wi * jy * jy
+                g1 += wi * jx * res; g2 += wi * jy * res
+            A, C = a * (1 + lam) + 1e-9, cc * (1 + lam) + 1e-9
+            det = A * C - b * b
+            if abs(det) < 1e-14:
+                break
+            sx, sy = -(C * g1 - b * g2) / det, -(A * g2 - b * g1) / det
+            nc = cost(x + sx, y + sy)
+            if nc < c:
+                x, y, c, lam = x + sx, y + sy, nc, lam * 0.3
+                if math.hypot(sx, sy) < 1e-4:
+                    break
+            else:
+                lam *= 10
+                if lam > 1e9:
+                    break
+    rms = math.sqrt(sum((math.hypot(x - px, y - py) - d) ** 2 for px, py, d in pts) / len(pts))
+    return x, y, rms
+
+
+class Locator:
+    """Об’єднує виміри, розв’язок і згладжування."""
+
+    def __init__(self, cfg, readings):
+        self.cfg, self.readings = cfg, readings
+        self.pos = None      # згладжене положення (x, y)
+        self.rms = None
+        self.rows = []       # стан кожного передавача для екрана
+        self.unknown = []
+        self.heard = 0
+
+    def update(self, now=None):
+        snap = self.readings.snapshot(now)
+        known = {t["mac"] for t in self.cfg["transmitters"]}
+        pts, rows = [], []
+        for t in self.cfg["transmitters"]:
+            r = snap.get(t["mac"])
+            if r:
+                d = distance_from_loss(r["pl"], self.cfg)
+                pts.append((t["x"], t["y"], d))
+                rows.append((t, r, d))
+            else:
+                rows.append((t, None, None))
+        self.rows, self.heard = rows, len(pts)
+        self.unknown = sorted(
+            ((m, r, distance_from_loss(r["pl"], self.cfg)) for m, r in snap.items() if m not in known),
+            key=lambda u: -u[1]["rssi"])
+        res = solve(pts)
+        if res is None:
+            self.pos, self.rms = None, None
+            return
+        x, y, self.rms = res
+        a = float(self.cfg["smoothing"])
+        if self.pos is None:
+            self.pos = (x, y)
+        else:
+            self.pos = (self.pos[0] + a * (x - self.pos[0]), self.pos[1] + a * (y - self.pos[1]))

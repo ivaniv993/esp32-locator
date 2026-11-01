@@ -1,0 +1,237 @@
+"""Екран з мапою (pygame)."""
+import math
+import time
+from collections import deque
+
+from .config import save_config
+from .readings import Readings
+from .solver import Locator
+from .sources import SerialReader
+
+BG = (14, 21, 34)
+PAPER = (22, 32, 50)
+GRID = (31, 44, 65)
+MAJOR = (46, 62, 88)
+INK = (227, 233, 240)
+MUTED = (150, 165, 184)
+TX = (63, 196, 204)
+EST = (255, 111, 156)
+WARN = (240, 179, 90)
+
+
+def fmt(v, n=2):
+    return f"{v:.{n}f}".replace(".", ",")
+
+
+def mix(c1, c2, t):
+    return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
+
+
+def run_gui(cfg, cfg_path):
+    import pygame
+
+    readings = Readings(cfg["window_sec"])
+    reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"])
+    reader.start()
+    loc = Locator(cfg, readings)
+
+    pygame.display.init()   # без звуку: аудіо не потрібне
+    pygame.font.init()
+    fullscreen = bool(cfg["fullscreen"])
+
+    def open_window():
+        if fullscreen:
+            return pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+        return pygame.display.set_mode((960, 560), pygame.RESIZABLE)
+
+    open_window()
+    pygame.display.set_caption("Позиціонування за LoRa-маяками")
+
+    def font(size, bold=False):
+        return pygame.font.SysFont("dejavusans,freesans,liberationsans", size, bold=bold)
+
+    f_big, f_mid, f_txt, f_small = font(26, True), font(19, True), font(16), font(13)
+    clock = pygame.time.Clock()
+    trail = deque(maxlen=80)
+    last_calc = 0.0
+    rate, rate_t, rate_n = 0.0, time.monotonic(), readings.total
+    selected = None          # MAC незареєстрованого передавача, який зараз розміщуємо
+    unknown_rects = []       # області рядків списку для натискання
+    geo = {}                 # геометрія мапи з попереднього кадру
+    msg, msg_t = "", 0.0
+
+    def text(surf, s, f, color, pos, anchor="topleft"):
+        img = f.render(s, True, color)
+        rect = img.get_rect(**{anchor: pos})
+        surf.blit(img, rect)
+        return rect
+
+    def dashed_circle(surf, color, c, r, dash=7):
+        r = min(r, 4000)
+        n = max(16, int(2 * math.pi * r / dash))
+        n -= n % 2
+        for i in range(0, n, 2):
+            a1, a2 = 2 * math.pi * i / n, 2 * math.pi * (i + 1) / n
+            pygame.draw.line(surf, color, (c[0] + r * math.cos(a1), c[1] + r * math.sin(a1)),
+                             (c[0] + r * math.cos(a2), c[1] + r * math.sin(a2)), 1)
+
+    while True:
+        for e in pygame.event.get():
+            if e.type == pygame.QUIT:
+                return
+            if e.type == pygame.KEYDOWN:
+                if e.key == pygame.K_ESCAPE and selected:
+                    selected = None
+                elif e.key in (pygame.K_ESCAPE, pygame.K_q):
+                    return
+                if e.key == pygame.K_f:
+                    fullscreen = not fullscreen
+                    open_window()
+                if e.key == pygame.K_c:
+                    trail.clear()
+            if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and geo:
+                hit = next((mac for mac, r in unknown_rects if r.collidepoint(e.pos)), None)
+                if hit:
+                    selected = None if selected == hit else hit
+                elif selected and geo["map"].collidepoint(e.pos):
+                    wx = (e.pos[0] - geo["ox"]) / geo["scale"]
+                    wy = (geo["oy"] - e.pos[1]) / geo["scale"]
+                    if 0 <= wx <= geo["aw"] and 0 <= wy <= geo["ah"]:
+                        wx, wy = round(wx, 1), round(wy, 1)
+                        used = {t.get("name") for t in cfg["transmitters"]}
+                        name = next((chr(c) for c in range(65, 91) if chr(c) not in used),
+                                    str(len(cfg["transmitters"]) + 1))
+                        cfg["transmitters"].append({"name": name, "mac": selected, "x": wx, "y": wy})
+                        save_config(cfg_path, cfg)
+                        msg, msg_t = f"Зареєстровано {name}: {selected}  ({fmt(wx, 1)}; {fmt(wy, 1)} м)", time.monotonic()
+                        selected = None
+                        last_calc = 0.0
+
+        now = time.monotonic()
+        if now - last_calc >= 0.2:
+            last_calc = now
+            loc.update()
+            if loc.pos:
+                trail.append(loc.pos)
+        if now - rate_t >= 1.0:
+            rate = (readings.total - rate_n) / (now - rate_t)
+            rate_t, rate_n = now, readings.total
+
+        screen = pygame.display.get_surface()
+        W, H = screen.get_size()
+        screen.fill(BG)
+
+        # --- геометрія мапи
+        panel_w = max(260, min(340, int(W * 0.36)))
+        if W < 640:                      # вузький екран: панель знизу
+            map_rect = pygame.Rect(0, 0, W, int(H * 0.58))
+            panel = pygame.Rect(0, map_rect.bottom, W, H - map_rect.bottom)
+        else:
+            map_rect = pygame.Rect(0, 0, W - panel_w, H)
+            panel = pygame.Rect(map_rect.right, 0, panel_w, H)
+
+        aw, ah = float(cfg["area"]["width"]), float(cfg["area"]["height"])
+        pad = 34
+        scale = min((map_rect.w - 2 * pad) / aw, (map_rect.h - 2 * pad) / ah)
+        ox = map_rect.x + (map_rect.w - aw * scale) / 2
+        oy = map_rect.y + (map_rect.h + ah * scale) / 2
+
+        def P(x, y):
+            return int(ox + x * scale), int(oy - y * scale)
+
+        geo = {"map": map_rect, "ox": ox, "oy": oy, "scale": scale, "aw": aw, "ah": ah}
+
+        x0, y0 = P(0, ah)
+        pygame.draw.rect(screen, PAPER, (x0, y0, int(aw * scale), int(ah * scale)))
+        step = 1 if scale >= 12 else (5 if scale >= 3 else 10)
+        major = 5 if step == 1 else step * 2
+        gx = 0.0
+        while gx <= aw + 1e-9:
+            col = MAJOR if round(gx) % major == 0 else GRID
+            pygame.draw.line(screen, col, P(gx, 0), P(gx, ah))
+            if round(gx) % major == 0:
+                text(screen, str(int(gx)), f_small, MUTED, (P(gx, 0)[0], P(gx, 0)[1] + 5), "midtop")
+            gx += step
+        gy = 0.0
+        while gy <= ah + 1e-9:
+            col = MAJOR if round(gy) % major == 0 else GRID
+            pygame.draw.line(screen, col, P(0, gy), P(aw, gy))
+            if round(gy) % major == 0 and gy > 0:
+                text(screen, str(int(gy)), f_small, MUTED, (P(0, gy)[0] - 6, P(0, gy)[1]), "midright")
+            gy += step
+        text(screen, "м", f_small, MUTED, (P(aw, 0)[0] + 16, P(aw, 0)[1] + 5))
+
+        # --- кола відстаней, слід, передавачі, положення
+        for t, r, d in loc.rows:
+            if d is not None:
+                dashed_circle(screen, mix(PAPER, TX, 0.55), P(t["x"], t["y"]), int(d * scale))
+        for i, p in enumerate(trail):
+            pygame.draw.circle(screen, mix(PAPER, EST, 0.1 + 0.4 * i / len(trail)), P(*p), 3)
+        for t, r, d in loc.rows:
+            c = P(t["x"], t["y"])
+            pygame.draw.circle(screen, TX if r is not None else mix(PAPER, TX, 0.35), c, 9)
+            pygame.draw.circle(screen, PAPER, c, 9, 2)
+            label = f"{t.get('name') or t['mac'][-5:]}  " + (f"{r['rssi']:.0f} дБм" if r else "немає")
+            right = c[0] > map_rect.right - 120
+            text(screen, label, f_txt, INK, (c[0] + (-14 if right else 14), c[1]),
+                 "midright" if right else "midleft")
+        if loc.pos:   # маркер не виходить за межі мапи, точні числа — на панелі
+            c = P(min(aw, max(0.0, loc.pos[0])), min(ah, max(0.0, loc.pos[1])))
+            pygame.draw.circle(screen, EST, c, 14, 3)
+            pygame.draw.line(screen, EST, (c[0] - 20, c[1]), (c[0] + 20, c[1]), 2)
+            pygame.draw.line(screen, EST, (c[0], c[1] - 20), (c[0], c[1] + 20), 2)
+
+        if selected:
+            text(screen, f"Клацніть на мапі, де стоїть {selected}   (Esc — скасувати)", f_txt, EST,
+                 (map_rect.x + 16, map_rect.y + 6))
+        elif msg and now - msg_t < 5:
+            text(screen, msg, f_txt, TX, (map_rect.x + 16, map_rect.y + 6))
+
+        # --- панель
+        pygame.draw.rect(screen, PAPER, panel)
+        x, y = panel.x + 18, panel.y + 16
+        text(screen, "Положення приймача", f_txt, MUTED, (x, y)); y += 24
+        if loc.pos:
+            text(screen, f"x = {fmt(loc.pos[0])} м", f_big, EST, (x, y)); y += 32
+            text(screen, f"y = {fmt(loc.pos[1])} м", f_big, EST, (x, y)); y += 34
+            text(screen, f"Узгодженість вимірів: ±{fmt(loc.rms, 1)} м", f_small, MUTED, (x, y)); y += 22
+        else:
+            text(screen, "невідоме", f_big, MUTED, (x, y)); y += 40
+        if loc.heard < 3:
+            text(screen, f"Чути {loc.heard} з {len(cfg['transmitters'])} маяків", f_small, WARN, (x, y))
+            y += 18
+            text(screen, "Для точного положення потрібно 3.", f_small, WARN, (x, y))
+            y += 22
+        y += 10
+        text(screen, "Маяки", f_mid, INK, (x, y)); y += 28
+        for t, r, d in loc.rows:
+            name = t.get("name") or "—"
+            text(screen, f"{name}  {t['mac']}", f_small, INK, (x, y)); y += 17
+            if r is None:
+                text(screen, "немає сигналу", f_small, WARN, (x, y))
+            else:
+                snr = f"   SNR {fmt(r['snr'], 0)}" if r["snr"] is not None else ""
+                text(screen, f"{r['rssi']:.0f} дБм{snr}   {fmt(d, 1)} м   пак.: {r['n']}", f_small, MUTED, (x, y))
+            y += 24
+        unknown_rects = []
+        if loc.unknown:
+            y += 4
+            text(screen, f"Незареєстровані ({len(loc.unknown)}):", f_small, WARN, (x, y)); y += 20
+            limit = max(1, (panel.bottom - 80 - y) // 36)
+            for mac, r, d in loc.unknown[:limit]:
+                row = pygame.Rect(panel.x + 10, y - 3, panel.w - 20, 34)
+                if mac == selected:
+                    pygame.draw.rect(screen, mix(PAPER, EST, 0.3), row, border_radius=5)
+                elif row.collidepoint(pygame.mouse.get_pos()):
+                    pygame.draw.rect(screen, mix(PAPER, INK, 0.08), row, border_radius=5)
+                text(screen, mac, f_small, INK, (x, y)); y += 15
+                text(screen, f"{r['rssi']:.0f} дБм   ~{fmt(d, 1)} м", f_small, MUTED, (x, y)); y += 21
+                unknown_rects.append((mac, row))
+            if not selected:
+                text(screen, "Торкніться ID, щоб розмістити на мапі", f_small, MUTED, (x, y + 2))
+        by = panel.bottom - 16
+        text(screen, "F — повний екран   C — очистити слід   Q — вихід", f_small, MUTED, (x, by), "bottomleft")
+        text(screen, f"{reader.status}   {rate:.0f} пак./с", f_small, MUTED, (x, by - 20), "bottomleft")
+
+        pygame.display.flip()
+        clock.tick(30)

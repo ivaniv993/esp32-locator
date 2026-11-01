@@ -7,7 +7,8 @@
 #   ./install-raspberry.sh --uninstall  — видалити програму (налаштування залишаться)
 #
 # Куди встановлюється:
-#   /opt/esp32-locator/locator.py           — програма
+#   /opt/esp32-locator/locator.py           — точка входу
+#   /opt/esp32-locator/esp32_locator/       — модулі програми
 #   /usr/local/bin/esp32-locator            — команда для запуску
 #   ~/.config/esp32-locator/config.json     — ваші налаштування і маяки (не перезаписуються)
 #   ~/.config/autostart/esp32-locator.desktop — автозапуск
@@ -37,7 +38,7 @@ for arg in "$@"; do
     --uart) UART=1 ;;
     --no-autostart) AUTO=0 ;;
     --uninstall) UNINSTALL=1 ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
     *) echo "Невідомий параметр: $arg (див. --help)"; exit 1 ;;
   esac
 done
@@ -52,8 +53,8 @@ if [ "$UNINSTALL" -eq 1 ]; then
   exit 0
 fi
 
-if [ ! -f "$SRC_DIR/locator.py" ]; then
-  echo "Не знайдено locator.py поруч зі скриптом. Запускайте з папки репозиторію."
+if [ ! -f "$SRC_DIR/locator.py" ] || [ ! -d "$SRC_DIR/esp32_locator" ]; then
+  echo "Не знайдено locator.py або esp32_locator/ поруч зі скриптом. Запускайте з папки репозиторію."
   exit 1
 fi
 if ! grep -qi "raspberry" /proc/device-tree/model 2>/dev/null; then
@@ -67,8 +68,10 @@ if [ -z "$ESP32_LOCATOR_SKIP_APT" ]; then
 fi
 
 say "2/5  Копіювання програми в $APP_DIR"
-$SUDO install -d -m 755 "$APP_DIR"
+$SUDO install -d -m 755 "$APP_DIR" "$APP_DIR/esp32_locator"
 $SUDO install -m 755 "$SRC_DIR/locator.py" "$APP_DIR/locator.py"
+$SUDO rm -f "$APP_DIR"/esp32_locator/*.py          # прибираємо модулі, яких уже немає в репо
+$SUDO install -m 644 "$SRC_DIR"/esp32_locator/*.py "$APP_DIR/esp32_locator/"
 $SUDO tee "$BIN" >/dev/null <<'LAUNCHER'
 #!/bin/sh
 export ESP32_LOCATOR_CONFIG="$HOME/.config/esp32-locator/config.json"
