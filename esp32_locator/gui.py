@@ -4,6 +4,7 @@ import time
 from collections import deque
 
 from .config import save_config
+from .packetlog import PacketFeed, format_row
 from .solver import Locator
 
 BG = (14, 21, 34)
@@ -34,6 +35,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
     import pygame
 
     loc = Locator(cfg, readings)
+    feed = PacketFeed(readings)      # журнал пакетів; порожній, якщо Readings створено без keep_recent
+    show_log = True
     editable = cfg_path is not None
 
     pygame.display.init()   # без звуку: аудіо не потрібне
@@ -90,6 +93,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
                     open_window()
                 if e.key == pygame.K_c:
                     trail.clear()
+                if e.key == pygame.K_l:
+                    show_log = not show_log
             if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and geo and editable:
                 hit = next((mac for mac, r in unknown_rects if r.collidepoint(e.pos)), None)
                 if hit:
@@ -109,6 +114,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
                         last_calc = 0.0
 
         now = time.monotonic()
+        feed.update(cfg["transmitters"])
         if now - last_calc >= 0.2:
             last_calc = now
             loc.update()
@@ -130,6 +136,11 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         else:
             map_rect = pygame.Rect(0, 0, W - panel_w, H)
             panel = pygame.Rect(map_rect.right, 0, panel_w, H)
+        log_rect = None
+        if show_log and map_rect.h >= 360:     # журнал пакетів — смуга внизу мапи
+            log_h = min(190, int(map_rect.h * 0.34))
+            log_rect = pygame.Rect(map_rect.x, map_rect.bottom - log_h, map_rect.w, log_h)
+            map_rect = pygame.Rect(map_rect.x, map_rect.y, map_rect.w, map_rect.h - log_h)
 
         aw, ah = float(cfg["area"]["width"]), float(cfg["area"]["height"])
         pad = 34
@@ -194,6 +205,23 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         elif banner:
             text(screen, banner, f_txt, TRUTH if truth else TX, (map_rect.x + 16, map_rect.y + 6))
 
+        # --- журнал пакетів: за порядком надходження, нові внизу
+        if log_rect:
+            pygame.draw.rect(screen, PAPER, log_rect)
+            pygame.draw.line(screen, MAJOR, log_rect.topleft, log_rect.topright)
+            screen.set_clip(log_rect)
+            text(screen, f"Пакети від приймача (нові внизу)   усього: {readings.total}", f_small, MUTED,
+                 (log_rect.x + 14, log_rect.y + 6))
+            rows = list(feed.rows)[-max(1, (log_rect.h - 32) // 16):]
+            ly = log_rect.y + 26
+            if not rows:
+                text(screen, "Пакетів ще немає. Перевірте приймач і маяки.", f_small, WARN, (log_rect.x + 14, ly))
+            for i, r in enumerate(rows):
+                color = WARN if r.name is None else (INK if i >= len(rows) - 3 else MUTED)
+                text(screen, format_row(r), f_small, color, (log_rect.x + 14, ly))
+                ly += 16
+            screen.set_clip(None)
+
         # --- панель
         pygame.draw.rect(screen, PAPER, panel)
         x, y = panel.x + 18, panel.y + 16
@@ -228,7 +256,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         if loc.unknown:
             y += 4
             text(screen, f"Незареєстровані ({len(loc.unknown)}):", f_small, WARN, (x, y)); y += 20
-            limit = max(1, (panel.bottom - 80 - y) // 36)
+            limit = max(1, (panel.bottom - 100 - y) // 36)
             for mac, r, d in loc.unknown[:limit]:
                 row = pygame.Rect(panel.x + 10, y - 3, panel.w - 20, 34)
                 if mac == selected:
@@ -241,8 +269,9 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
             if editable and not selected:
                 text(screen, "Торкніться ID, щоб розмістити на мапі", f_small, MUTED, (x, y + 2))
         by = panel.bottom - 16
-        text(screen, "F — повний екран   C — очистити слід   Q — вихід", f_small, MUTED, (x, by), "bottomleft")
-        text(screen, f"{reader.status}   {rate:.0f} пак./с", f_small, MUTED, (x, by - 20), "bottomleft")
+        text(screen, "L — журнал пакетів   Q — вихід", f_small, MUTED, (x, by), "bottomleft")
+        text(screen, "F — повний екран   C — очистити слід", f_small, MUTED, (x, by - 18), "bottomleft")
+        text(screen, f"{reader.status}   {rate:.0f} пак./с", f_small, MUTED, (x, by - 38), "bottomleft")
 
         pygame.display.flip()
         clock.tick(30)

@@ -10,11 +10,13 @@ class Readings:
     Час можна передавати явно (ts / now) — так алгоритм можна прогнати по запису;
     без нього береться time.monotonic()."""
 
-    def __init__(self, window):
+    def __init__(self, window, keep_recent=0):
+        """keep_recent > 0 — додатково пам’ятати останні пакети поштучно (для журналу на екрані)."""
         self.window = window
         self.lock = threading.Lock()
         self.data = {}
         self.total = 0
+        self.recent = deque(maxlen=keep_recent) if keep_recent else None
 
     def add(self, mac, rssi, snr, txp, ts=None):
         if ts is None:
@@ -22,6 +24,13 @@ class Readings:
         with self.lock:
             self.data.setdefault(mac, deque()).append((ts, rssi, snr, txp))
             self.total += 1
+            if self.recent is not None:
+                self.recent.append((self.total, time.time(), mac, rssi, snr, txp))
+
+    def packets_after(self, seq):
+        """Пакети з номером більше seq у порядку надходження: (номер, час, id, rssi, snr, txp)."""
+        with self.lock:
+            return [p for p in self.recent if p[0] > seq] if self.recent is not None else []
 
     def snapshot(self, now=None):
         """{id: {rssi, snr, txp, pl, n, age}} — медіани за вікно; pl = потужність − RSSI (втрати, дБ)."""

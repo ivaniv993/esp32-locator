@@ -16,6 +16,8 @@ from .session import (SessionWriter, default_recordings_dir, load_session, make_
 from .solver import distance_from_loss
 from .sources import ReplaySource, SerialReader
 
+KEEP_RECENT = 200      # скільки останніх пакетів пам’ятати для журналу на екрані
+
 
 def parse_xy(pair):
     """['2,5', '1'] -> (2.5, 1.0); sys.exit з поясненням, якщо це не числа."""
@@ -41,7 +43,7 @@ def record(cfg, args):
     directory = args.out or default_recordings_dir(cfg)
     path = new_session_path(directory)
     writer = SessionWriter(path, make_header(cfg, truth, args.note or ""))
-    readings = Readings(cfg["window_sec"])
+    readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
     reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
                           on_line=writer.write_rx)
     reader.start()
@@ -94,7 +96,7 @@ def replay(cfg, args):
     except (OSError, ValueError) as e:
         sys.exit(f"Не вдалося прочитати запис: {e}")
     rcfg = session_config(cfg, session)
-    readings = Readings(rcfg["window_sec"])
+    readings = Readings(rcfg["window_sec"], keep_recent=KEEP_RECENT)
     source = ReplaySource(session, readings, rcfg["default_tx_power_dbm"], loop=args.loop)
     source.start()
     note = session.header.get("note")
@@ -207,7 +209,7 @@ def main():
     elif args.evaluate:
         evaluate(cfg, args)
     else:
-        readings = Readings(cfg["window_sec"])
+        readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
         reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"])
         reader.start()
         run_gui(cfg, args.config, readings, reader)
