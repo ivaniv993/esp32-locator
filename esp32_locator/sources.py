@@ -9,7 +9,6 @@ from .protocol import parse_line
 
 class SerialReader(threading.Thread):
     """Читає приймач у фоні, сам знаходить порт і перепідключається."""
-
     def __init__(self, port, baud, readings, default_txp=14, on_line=None):
         super().__init__(daemon=True)
         self.port, self.baud, self.readings = port, baud, readings
