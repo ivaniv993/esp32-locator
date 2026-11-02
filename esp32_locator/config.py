@@ -16,6 +16,8 @@ DEFAULT_CONFIG = {
     "area": {"width": 10, "height": 8},
     "signal": {"pl_1m": 40.0, "pl_10m": 67.0},   # втрати сигналу (дБ) на 1 м і на 10 м
     "default_tx_power_dbm": 14,                    # якщо приймач не передає потужність
+    "radio": {"sf": 12, "bw_khz": 125},            # як прошиті маяки й приймач; приймач цього не повідомляє,
+                                                   # тому значення лише записується в сесії для опису
     "window_sec": 3.0,                             # маяк шле 2 пакети/с — беремо медіану за 3 с
     "smoothing": 0.35,
     "fullscreen": False,
@@ -31,6 +33,7 @@ def load_config(path):
         cfg = json.load(f)
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update(cfg)
+    merged["radio"] = {**DEFAULT_CONFIG["radio"], **cfg.get("radio", {})}
     if "pl_1m" not in merged["signal"]:
         # старий формат (сила 0–1000) — переходимо на модель в децибелах
         merged["signal"] = dict(DEFAULT_CONFIG["signal"])

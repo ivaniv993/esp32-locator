@@ -1,19 +1,24 @@
 """Файл сесії запису: один файл JSON Lines на сесію.
 
-Перший рядок — заголовок (зона, маяки з координатами, справжнє положення приймача),
-далі по рядку на кожен пакет від приймача з часом від початку запису:
-    {"type":"header","version":1,"started_at":"2026-11-01T14:30:05","receiver_truth":{"x":3.5,"y":2.0},...}
+Перший рядок — заголовок (зона, маяки з координатами і відстанню до приймача, справжнє положення
+приймача, налаштування радіо), далі по рядку на кожен пакет від приймача з часом від початку запису:
+    {"type":"header","version":1,"started_at":"2026-11-01T14:30:05","receiver_truth":{"x":3.5,"y":2.0},
+     "radio":{"sf":7,"bw_khz":125},...}
     {"type":"rx","t":0.512,"line":"A1B2C3D4E5F6,-67.5,9.2,14"}
-Невідомі типи рядків при читанні пропускаються — формат можна розширювати.
+Невідомі типи рядків і поля при читанні пропускаються — формат можна розширювати.
+"radio" і "distance" у маяків з’явились пізніше: у старих записах їх немає.
 """
 import json
+import math
 import os
+import statistics
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from .config import HERE
+from .protocol import parse_line
 
 FORMAT_VERSION = 1
 EXT = ".jsonl"
@@ -41,17 +46,25 @@ def new_session_path(directory):
     return path
 
 
+def distance_to(truth, t):
+    """Відстань від приймача до маяка за координатами, м (округлено до 0,1 — координати теж приблизні)."""
+    return round(math.hypot(float(t["x"]) - truth[0], float(t["y"]) - truth[1]), 1)
+
+
 def make_header(cfg, truth, note=""):
     """Заголовок сесії: усе, що потрібно, щоб відтворити запис без config.json."""
+    truth = float(truth[0]), float(truth[1])
     return {
         "type": "header",
         "version": FORMAT_VERSION,
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "note": note,
         "area": dict(cfg["area"]),
-        "transmitters": [{"name": t.get("name", ""), "mac": t["mac"], "x": t["x"], "y": t["y"]}
+        "transmitters": [{"name": t.get("name", ""), "mac": t["mac"], "x": t["x"], "y": t["y"],
+                          "distance": distance_to(truth, t)}
                          for t in cfg["transmitters"]],
-        "receiver_truth": {"x": float(truth[0]), "y": float(truth[1])},
+        "receiver_truth": {"x": truth[0], "y": truth[1]},
+        "radio": dict(cfg["radio"]),         # SF і ширина каналу, з якими прошиті маяки (опис запису)
         "signal": dict(cfg["signal"]),       # калібрування на момент запису (довідково)
         "baud": cfg["baud"],
         "default_tx_power_dbm": cfg["default_tx_power_dbm"],
@@ -113,6 +126,62 @@ class Session:
     @property
     def duration(self):
         return self.rx[-1][0] if self.rx else 0.0
+
+    @property
+    def radio(self):
+        """{"sf": 7, "bw_khz": 125} або None для записів, зроблених до появи цього поля."""
+        return self.header.get("radio")
+
+    @property
+    def sf(self):
+        return (self.radio or {}).get("sf")
+
+    def distances(self):
+        """{id маяка: відстань до приймача, м}; у старих записах рахується з координат."""
+        return {t["mac"]: t["distance"] if "distance" in t else distance_to(self.truth, t)
+                for t in self.header["transmitters"]}
+
+
+def radio_label(radio):
+    """'SF7, 125 кГц' або '—', якщо не вказано."""
+    if not radio or radio.get("sf") is None:
+        return "—"
+    bw = radio.get("bw_khz")
+    return f"SF{radio['sf']}" + (f", {bw:g} кГц" if bw is not None else "")
+
+
+def describe(session, default_txp=14):
+    """Текстовий опис запису: умови (SF, відстані) і скільки пакетів реально прийнято від кожного маяка."""
+    h = session.header
+    per = {}
+    for _, line in session.rx:
+        got = parse_line(line, default_txp)
+        if got:
+            per.setdefault(got[0], []).append(got[1])
+    dur = session.duration
+    tx = h["transmitters"]
+    dist = session.distances()
+    lines = [
+        session.path,
+        f"  Записано: {h.get('started_at', '—')}   тривалість {dur:.0f} с, пакетів {len(session.rx)}",
+        f"  Опис: {h.get('note') or '—'}",
+        f"  Радіо: {radio_label(session.radio) if session.radio else 'не вказано (старий запис)'}",
+        f"  Приймач: ({session.truth[0]:g}; {session.truth[1]:g}) м, зона {h['area']['width']:g} × {h['area']['height']:g} м",
+        f"  {'Маяк':16} {'Відстань':>9} {'Пакетів':>8} {'Пак./с':>7} {'RSSI мед.':>10}",
+    ]
+
+    def row(label, d, rssi):
+        rate = len(rssi) / dur if dur else 0.0
+        med = f"{statistics.median(rssi):.0f} дБм" if rssi else "—"
+        d_s = f"{d:.1f} м" if d is not None else "—"
+        return f"  {label:16} {d_s:>9} {len(rssi):>8} {rate:>7.1f} {med:>10}"
+
+    for t in tx:
+        lines.append(row(f"{t.get('name') or '—'}  …{t['mac'][-6:]}", dist[t["mac"]], per.get(t["mac"], [])))
+    known = {t["mac"] for t in tx}
+    for mac in sorted(m for m in per if m not in known):
+        lines.append(row(f"?  …{mac[-6:]}", None, per[mac]) + "  (не зареєстровано)")
+    return "\n".join(lines)
 
 
 def load_session(path):

@@ -28,6 +28,7 @@ class Result:
     duration: float
     ticks: int
     fixes: list        # [(x, y)] оцінки на кроках, де чути ≥ MIN_BEACONS маяків
+    sf: int = None     # SF із запису (None — не вказано)
 
     @property
     def errors(self):
@@ -39,6 +40,7 @@ class Result:
         b = bias(self.fixes, self.truth)
         m["bias_x"], m["bias_y"] = b if b else (None, None)
         m["spread"] = spread(self.fixes)
+        m["sf"] = self.sf
         return m
 
 
@@ -65,7 +67,7 @@ def evaluate_session(session, cfg, step=STEP):
         ticks += 1
         if locator.heard >= MIN_BEACONS and locator.pos:
             fixes.append(locator.pos)
-    return Result(os.path.basename(session.path), session.truth, session.duration, ticks, fixes)
+    return Result(os.path.basename(session.path), session.truth, session.duration, ticks, fixes, session.sf)
 
 
 def collect_paths(args):
@@ -125,12 +127,13 @@ def _f(v, n=2, signed=False):
 def _row(name, m, extra=True):
     bias_s = f"({_f(m['bias_x'], 1, True)};{_f(m['bias_y'], 1, True)})" if extra and m.get("bias_x") is not None else ""
     spread_s = _f(m.get("spread")) if extra else ""
-    return (f"{name[:28]:28} {m.get('duration', 0):5.0f} с {m['coverage'] * 100:6.0f}% "
+    sf_s = (str(m["sf"]) if m.get("sf") is not None else "—") if extra else ""
+    return (f"{name[:28]:28} {sf_s:>3} {m.get('duration', 0):5.0f} с {m['coverage'] * 100:6.0f}% "
             f"{_f(m['mean']):>6} {_f(m['median']):>6} {_f(m['p95']):>6} {_f(m['max']):>6} {_f(m['rmse']):>6} "
             f"{bias_s:>14} {spread_s:>6}")
 
 
-HEADER = f"{'Запис':28} {'Трив.':>7} {'Покр.':>7} {'Сер.':>6} {'Мед.':>6} {'p95':>6} {'Макс':>6} {'СКВ':>6} {'Зсув x;y':>14} {'Розкид':>6}"
+HEADER = f"{'Запис':28} {'SF':>3} {'Трив.':>7} {'Покр.':>7} {'Сер.':>6} {'Мед.':>6} {'p95':>6} {'Макс':>6} {'СКВ':>6} {'Зсув x;y':>14} {'Розкид':>6}"
 
 
 def format_report(results, cfg):
@@ -140,6 +143,8 @@ def format_report(results, cfg):
     lines = [f"Параметри: pl_1m={p['pl_1m']} pl_10m={p['pl_10m']} smoothing={p['smoothing']} "
              f"window={p['window_sec']} с, крок {p['step']} с", "", HEADER, "-" * len(HEADER)]
     lines += [_row(r.name, r.metrics()) for r in results]
+    if len({r.sf for r in results}) > 1:
+        lines += ["", "Увага: записи зроблено з різним SF — різниця в похибці може бути через радіо, а не через алгоритм."]
     if len(results) > 1:
         lines += ["-" * len(HEADER), _row(f"Разом ({len(results)})", {**total_metrics(results), "duration": sum(r.duration for r in results)}, extra=False)]
     return "\n".join(lines)
