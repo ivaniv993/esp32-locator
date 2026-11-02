@@ -35,6 +35,19 @@ class EvaluateTest(unittest.TestCase):
         self.assertEqual((m["fixes"], m["coverage"], m["mean"]), (0, 0.0, None))
         self.assertIn("—", format_report([evaluate_session(make_session(beacons=BEACONS[:2]), default_cfg())], default_cfg()))
 
+    def test_report_shows_sf_and_warns_when_it_differs(self):
+        cfg = default_cfg()
+        r7 = evaluate_session(make_session(radio={"sf": 7, "bw_khz": 125}, path="sf7.jsonl"), cfg)
+        r12 = evaluate_session(make_session(radio={"sf": 12, "bw_khz": 125}, path="sf12.jsonl"), cfg)
+        old = evaluate_session(make_session(path="old.jsonl"), cfg)
+        self.assertEqual((r7.sf, r12.sf, old.sf, r7.metrics()["sf"]), (7, 12, None, 7))
+        text = format_report([r7, r12, old], cfg)
+        self.assertRegex(text, r"sf7\.jsonl\s+7 ")
+        self.assertRegex(text, r"sf12\.jsonl\s+12 ")
+        self.assertRegex(text, r"old\.jsonl\s+— ")
+        self.assertIn("різним SF", text)
+        self.assertNotIn("різним SF", format_report([r7], cfg))
+
     def test_deterministic(self):
         a = evaluate_session(make_session(noise_db=2.0), default_cfg()).fixes
         b = evaluate_session(make_session(noise_db=2.0), default_cfg()).fixes

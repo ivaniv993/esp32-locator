@@ -143,10 +143,10 @@ def format_report(results, cfg):
     lines = [f"Параметри: pl_1m={p['pl_1m']} pl_10m={p['pl_10m']} smoothing={p['smoothing']} "
              f"window={p['window_sec']} с, крок {p['step']} с", "", HEADER, "-" * len(HEADER)]
     lines += [_row(r.name, r.metrics()) for r in results]
-    if len({r.sf for r in results}) > 1:
-        lines += ["", "Увага: записи зроблено з різним SF — різниця в похибці може бути через радіо, а не через алгоритм."]
     if len(results) > 1:
         lines += ["-" * len(HEADER), _row(f"Разом ({len(results)})", {**total_metrics(results), "duration": sum(r.duration for r in results)}, extra=False)]
+    if len({r.sf for r in results}) > 1:
+        lines += ["", "Увага: записи зроблено з різним SF — різниця в похибці може бути через радіо, а не через алгоритм."]
     return "\n".join(lines)
 
 

@@ -11,8 +11,8 @@ from .evaluate import (collect_paths, compare, evaluate_files, format_report, lo
 from .gui import run_gui
 from .protocol import norm_mac
 from .readings import Readings
-from .session import (SessionWriter, default_recordings_dir, load_session, make_header,
-                      new_session_path, session_config)
+from .session import (SessionWriter, default_recordings_dir, describe, load_session, make_header,
+                      new_session_path, radio_label, session_config)
 from .solver import distance_from_loss
 from .sources import ReplaySource, SerialReader
 
@@ -39,22 +39,36 @@ def record(cfg, args):
         sys.exit(f"Приймач ({truth[0]}; {truth[1]}) поза зоною {aw} × {ah} м (параметр area у config.json)")
     if len(cfg["transmitters"]) < 3:
         print("Увага: маяків менше 3 — за таким записом положення не визначити.")
+    # приймач не повідомляє SF, тож записуємо те, що вказано (--sf/--bw або radio у config.json)
+    cfg["radio"] = dict(cfg["radio"])
+    if args.sf is not None:
+        cfg["radio"]["sf"] = args.sf
+    if args.bw is not None:
+        cfg["radio"]["bw_khz"] = args.bw
 
     directory = args.out or default_recordings_dir(cfg)
     path = new_session_path(directory)
-    writer = SessionWriter(path, make_header(cfg, truth, args.note or ""))
+    header = make_header(cfg, truth, args.note or "")
+    writer = SessionWriter(path, header)
     readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
     reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
                           on_line=writer.write_rx)
     reader.start()
-    print(f"Запис у {path}\nПриймач: ({truth[0]}; {truth[1]}) м, маяків: {len(cfg['transmitters'])}. Ctrl+C або Q — зупинити.")
+    radio = radio_label(cfg["radio"])
+    src = "--sf" if args.sf is not None else "radio у config.json"
+    print(f"Запис у {path}\nПриймач: ({truth[0]}; {truth[1]}) м, маяків: {len(cfg['transmitters'])}.")
+    print(f"Радіо: {radio} (з {src} — якщо маяки прошито інакше, зупиніть і вкажіть --sf)")
+    print("Відстані до маяків: " + ", ".join(f"{t['name'] or t['mac'][-4:]} {t['distance']:.1f} м"
+                                              for t in header["transmitters"]))
+    print("Ctrl+C або Q — зупинити.")
     try:
         if args.headless:
             while True:
                 time.sleep(5)
                 print(f"[{reader.status}]  пакетів: {writer.count}  ({writer.duration:.0f} с)")
         else:
-            run_gui(cfg, None, readings, reader, truth=truth, banner=f"● Запис: {os.path.basename(path)}")
+            run_gui(cfg, None, readings, reader, truth=truth,
+                    banner=f"● Запис: {os.path.basename(path)}  ·  {radio}")
     except KeyboardInterrupt:
         pass
     finally:
@@ -100,8 +114,26 @@ def replay(cfg, args):
     source = ReplaySource(session, readings, rcfg["default_tx_power_dbm"], loop=args.loop)
     source.start()
     note = session.header.get("note")
-    banner = f"▶ {os.path.basename(args.replay)}" + (f" — {note}" if note else "")
+    banner = (f"▶ {os.path.basename(args.replay)}" + (f"  ·  {radio_label(session.radio)}" if session.radio else "")
+              + (f" — {note}" if note else ""))
     run_gui(rcfg, None, readings, source, truth=session.truth, banner=banner)
+
+
+def info(cfg, args):
+    """Опис записів: умови (SF, відстані до маяків) і скільки пакетів прийнято від кожного маяка.
+    Зіпсований файл не зупиняє решту, але код виходу тоді 1."""
+    paths = collect_paths(args.info)
+    if not paths:
+        sys.exit("Записів не знайдено.")
+    failed = False
+    for i, p in enumerate(paths):
+        try:
+            print(("\n" if i else "") + describe(load_session(p), cfg["default_tx_power_dbm"]))
+        except (OSError, ValueError) as e:
+            print(("\n" if i else "") + f"{p}\n  Помилка: {e}")
+            failed = True
+    if failed:
+        sys.exit(1)
 
 
 def calibrate(cfg):
@@ -159,6 +191,10 @@ def main():
     ap.add_argument("--save", metavar="JSON", help="--evaluate: зберегти результат для наступних порівнянь")
     ap.add_argument("--truth", nargs=2, metavar=("X", "Y"), help="де стоїть приймач під час --record, м")
     ap.add_argument("--note", help="коментар до запису (--record)")
+    ap.add_argument("--sf", type=int, choices=range(5, 13), metavar="5-12",
+                    help="--record: spreading factor, з яким прошиті маяки (інакше radio.sf з config.json)")
+    ap.add_argument("--bw", type=float, metavar="кГц", help="--record: ширина каналу LoRa (інакше radio.bw_khz)")
+    g.add_argument("--info", nargs="+", metavar="FILE", help="опис записів: SF, відстані, пакети від маяків")
     ap.add_argument("--out", metavar="DIR", help="папка для записів (за замовчуванням recordings_dir)")
     ap.add_argument("--headless", action="store_true", help="--record без екрана (наприклад, по ssh)")
     ap.add_argument("--loop", action="store_true", help="--replay по колу")
@@ -206,6 +242,8 @@ def main():
         record(cfg, args)
     elif args.replay:
         replay(cfg, args)
+    elif args.info:
+        info(cfg, args)
     elif args.evaluate:
         evaluate(cfg, args)
     else:

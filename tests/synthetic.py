@@ -14,8 +14,9 @@ def default_cfg():
 
 
 def make_session(truth=(3.5, 2.0), duration=30.0, noise_db=0.0, seed=1, beacons=BEACONS,
-                 pl_1m=40.0, pl_10m=67.0, rate=2.0, path="synthetic.jsonl"):
-    """Запис у пам’яті. noise_db — стандартне відхилення шуму RSSI, дБ; seed робить його відтворюваним."""
+                 pl_1m=40.0, pl_10m=67.0, rate=2.0, path="synthetic.jsonl", radio=None):
+    """Запис у пам’яті. noise_db — стандартне відхилення шуму RSSI, дБ; seed робить його відтворюваним.
+    radio — {"sf": .., "bw_khz": ..}; без нього заголовок як у старих записах (без radio і distance)."""
     rng = random.Random(seed)
     header = {
         "type": "header", "version": FORMAT_VERSION, "started_at": "2026-01-01T00:00:00", "note": "synthetic",
@@ -24,6 +25,8 @@ def make_session(truth=(3.5, 2.0), duration=30.0, noise_db=0.0, seed=1, beacons=
         "receiver_truth": {"x": truth[0], "y": truth[1]},
         "signal": {"pl_1m": pl_1m, "pl_10m": pl_10m}, "baud": 115200, "default_tx_power_dbm": 14,
     }
+    if radio:
+        header["radio"] = dict(radio)
     rx = []
     for i in range(int(duration * rate)):
         for k, (_, mac, bx, by) in enumerate(beacons):

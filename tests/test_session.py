@@ -4,8 +4,9 @@ import os
 import tempfile
 import unittest
 
-from esp32_locator.session import (FORMAT_VERSION, SessionWriter, default_recordings_dir, load_session,
-                                   make_header, new_session_path, session_config)
+from esp32_locator.config import load_config
+from esp32_locator.session import (FORMAT_VERSION, SessionWriter, default_recordings_dir, describe,
+                                   load_session, make_header, new_session_path, radio_label, session_config)
 
 from .synthetic import default_cfg
 
@@ -94,6 +95,74 @@ class SessionTest(unittest.TestCase):
 
     def test_recordings_dir_from_config(self):
         self.assertEqual(default_recordings_dir({"recordings_dir": "/x/y"}), "/x/y")
+
+
+class RadioAndDistancesTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = os.path.join(self.tmp.name, "s.jsonl")
+
+    def record(self, truth, lines, radio=None):
+        cfg = cfg_with_tx()
+        cfg["transmitters"].append({"name": "B", "mac": "BBBBBBBBBBBB", "x": 10, "y": 0})
+        if radio:
+            cfg["radio"] = radio
+        w = SessionWriter(self.path, make_header(cfg, truth))
+        for line in lines:
+            w.write_rx(line)
+        w.close()
+        return load_session(self.path)
+
+    def test_header_stores_radio_and_distances(self):
+        s = self.record((3.0, 4.0), [], radio={"sf": 7, "bw_khz": 125})
+        self.assertEqual(s.radio, {"sf": 7, "bw_khz": 125})
+        self.assertEqual(s.sf, 7)
+        self.assertEqual([t["distance"] for t in s.header["transmitters"]], [5.0, 8.1])
+        self.assertEqual(s.distances(), {"AAAAAAAAAAAA": 5.0, "BBBBBBBBBBBB": 8.1})
+
+    def test_default_radio_comes_from_config(self):
+        self.assertEqual(self.record((1.0, 1.0), []).radio, {"sf": 12, "bw_khz": 125})
+
+    def test_old_recording_without_radio_and_distances(self):
+        header = {"type": "header", "version": 1, "area": {"width": 10, "height": 8},
+                  "transmitters": [{"name": "A", "mac": "AAAAAAAAAAAA", "x": 0, "y": 0}],
+                  "receiver_truth": {"x": 3, "y": 4}}
+        with open(self.path, "w", encoding="utf-8") as f:
+            f.write(json.dumps(header) + "\n")
+        s = load_session(self.path)
+        self.assertIsNone(s.radio)
+        self.assertIsNone(s.sf)
+        self.assertEqual(s.distances(), {"AAAAAAAAAAAA": 5.0})
+        self.assertIn("не вказано (старий запис)", describe(s))
+
+    def test_radio_label(self):
+        self.assertEqual(radio_label({"sf": 7, "bw_khz": 125}), "SF7, 125 кГц")
+        self.assertEqual(radio_label({"sf": 9, "bw_khz": 62.5}), "SF9, 62.5 кГц")
+        self.assertEqual(radio_label({"sf": 7}), "SF7")
+        self.assertEqual(radio_label(None), "—")
+
+    def test_describe_counts_packets_per_beacon(self):
+        a, c = "AAAAAAAAAAAA,-60.0,8.0,14", "CCCCCCCCCCCC,-80.0,2.0,14"
+        s = self.record((3.0, 4.0), [a, a, "AAAAAAAAAAAA,-64.0,8.0,14", c], radio={"sf": 7, "bw_khz": 125})
+        text = describe(s)
+        self.assertIn("Радіо: SF7, 125 кГц", text)
+        lines = {l.split()[0] + " " + l.split()[1]: l for l in text.splitlines() if "…" in l}
+        self.assertRegex(lines["A …AAAAAA"], r"5\.0 м\s+3\s+[\d.]+\s+-60 дБм$")
+        self.assertRegex(lines["B …BBBBBB"], r"8\.1 м\s+0\s+0\.0\s+—$")             # маяк є, пакетів немає
+        self.assertTrue(lines["? …CCCCCC"].endswith("(не зареєстровано)"))
+
+
+class ConfigRadioTest(unittest.TestCase):
+    def test_partial_and_missing_radio_get_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "config.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"radio": {"sf": 7}}, f)
+            self.assertEqual(load_config(path)["radio"], {"sf": 7, "bw_khz": 125})
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"area": {"width": 5, "height": 5}}, f)       # старий config.json без radio
+            self.assertEqual(load_config(path)["radio"], {"sf": 12, "bw_khz": 125})
 
 
 if __name__ == "__main__":

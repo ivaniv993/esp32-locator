@@ -15,8 +15,9 @@
     python3 locator.py --add ID X Y --name A    — зареєструвати / оновити маяк
     python3 locator.py --remove ID              — видалити маяк
     python3 locator.py --calibrate              — режим калібрування
-    python3 locator.py --record --truth X Y     — записати сесію (приймач стоїть у точці X, Y)
+    python3 locator.py --record --truth X Y --sf 7 — записати сесію (приймач стоїть у точці X, Y)
     python3 locator.py --replay FILE            — відтворити запис замість приймача
+    python3 locator.py --info FILE...           — опис записів: SF, відстані, пакети від маяків
     python3 locator.py --evaluate FILE...       — оцінити алгоритм на записах (--save / --baseline JSON)
 Клавіші на екрані: F — повний екран, C — очистити слід, Q або Esc — вихід.
 Незареєстрований маяк: торкніться його ID у списку, потім місця на мапі.
