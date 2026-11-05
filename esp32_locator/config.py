@@ -22,6 +22,7 @@ DEFAULT_CONFIG = {
     "smoothing": 0.35,
     "fullscreen": False,
     "recordings_dir": "auto",                      # куди --record пише сесії (auto — recordings/ у репо)
+    "geo": None,                                   # прив’язка мапи до широти/довготи (див. geo.py), None — немає
     "transmitters": [],
 }
 

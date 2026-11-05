@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from .config import HERE
+from .geo import format_latlon, frame_from_config
 from .protocol import parse_line
 
 FORMAT_VERSION = 1
@@ -65,6 +66,7 @@ def make_header(cfg, truth, note=""):
                          for t in cfg["transmitters"]],
         "receiver_truth": {"x": truth[0], "y": truth[1]},
         "radio": dict(cfg["radio"]),         # SF і ширина каналу, з якими прошиті маяки (опис запису)
+        "geo": cfg.get("geo"),               # прив’язка мапи до широти/довготи (None — немає)
         "signal": dict(cfg["signal"]),       # калібрування на момент запису (довідково)
         "baud": cfg["baud"],
         "default_tx_power_dbm": cfg["default_tx_power_dbm"],
@@ -150,6 +152,15 @@ def radio_label(radio):
     return f"SF{radio['sf']}" + (f", {bw:g} кГц" if bw is not None else "")
 
 
+def _latlon_suffix(geo, xy):
+    """' (50.450123, 30.523456)', якщо запис прив’язано до місцевості; інакше ''."""
+    try:
+        frame = frame_from_config(geo)
+    except ValueError:
+        return " (прив’язка geo у записі пошкоджена)"
+    return f" ({format_latlon(*frame.to_latlon(*xy))})" if frame else ""
+
+
 def describe(session, default_txp=14):
     """Текстовий опис запису: умови (SF, відстані) і скільки пакетів реально прийнято від кожного маяка."""
     h = session.header
@@ -166,7 +177,8 @@ def describe(session, default_txp=14):
         f"  Записано: {h.get('started_at', '—')}   тривалість {dur:.0f} с, пакетів {len(session.rx)}",
         f"  Опис: {h.get('note') or '—'}",
         f"  Радіо: {radio_label(session.radio) if session.radio else 'не вказано (старий запис)'}",
-        f"  Приймач: ({session.truth[0]:g}; {session.truth[1]:g}) м, зона {h['area']['width']:g} × {h['area']['height']:g} м",
+        f"  Приймач: ({session.truth[0]:g}; {session.truth[1]:g}) м{_latlon_suffix(h.get('geo'), session.truth)}, "
+        f"зона {h['area']['width']:g} × {h['area']['height']:g} м",
         f"  {'Маяк':16} {'Відстань':>9} {'Пакетів':>8} {'Пак./с':>7} {'RSSI мед.':>10}",
     ]
 
@@ -216,5 +228,6 @@ def session_config(cfg, session):
     (калібрування, згладжування, вікно) — з поточного config.json, щоб їх можна було змінювати."""
     out = json.loads(json.dumps(cfg))
     out["area"] = dict(session.header["area"])
+    out["geo"] = session.header.get("geo")     # координати маяків у записі відносно його прив’язки
     out["transmitters"] = [dict(t, x=float(t["x"]), y=float(t["y"])) for t in session.header["transmitters"]]
     return out

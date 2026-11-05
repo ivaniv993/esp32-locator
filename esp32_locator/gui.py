@@ -5,6 +5,7 @@ from collections import deque
 
 from .config import save_config
 from .mapedit import beacon_at, remove_beacon, screen_to_world
+from .geo import format_latlon, frame_from_config
 from .packetlog import PacketFeed, format_row
 from .solver import Locator
 
@@ -36,6 +37,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
     import pygame
 
     loc = Locator(cfg, readings)
+    geo_frame = frame_from_config(cfg.get("geo"))   # None — мапу не прив’язано до місцевості; перевіряє викликач
     feed = PacketFeed(readings)      # журнал пакетів; порожній, якщо Readings створено без keep_recent
     show_log = True
     editable = cfg_path is not None
@@ -279,6 +281,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         if loc.pos:
             text(screen, f"x = {fmt(loc.pos[0])} м", f_big, EST, (x, y)); y += 32
             text(screen, f"y = {fmt(loc.pos[1])} м", f_big, EST, (x, y)); y += 34
+            if geo_frame:
+                text(screen, format_latlon(*geo_frame.to_latlon(*loc.pos)), f_txt, EST, (x, y)); y += 22
             text(screen, f"Узгодженість вимірів: ±{fmt(loc.rms, 1)} м", f_small, MUTED, (x, y)); y += 22
             if truth:
                 err = math.hypot(loc.pos[0] - truth[0], loc.pos[1] - truth[1])

@@ -121,6 +121,26 @@ class RadioAndDistancesTest(unittest.TestCase):
         self.assertEqual([t["distance"] for t in s.header["transmitters"]], [5.0, 8.1])
         self.assertEqual(s.distances(), {"AAAAAAAAAAAA": 5.0, "BBBBBBBBBBBB": 8.1})
 
+    def test_geo_is_recorded_described_and_used_for_replay(self):
+        cfg = cfg_with_tx()
+        cfg["geo"] = {"origin": [50.4501, 30.5234], "x_bearing_deg": 90}
+        w = SessionWriter(self.path, make_header(cfg, (0.0, 0.0)))
+        w.close()
+        s = load_session(self.path)
+        self.assertEqual(s.header["geo"], cfg["geo"])
+        self.assertIn("Приймач: (0; 0) м (50.450100, 30.523400)", describe(s))
+        live = default_cfg()
+        live["geo"] = {"origin": [10.0, 10.0]}                    # інше місце — не повинно потрапити у відтворення
+        self.assertEqual(session_config(live, s)["geo"], cfg["geo"])
+
+    def test_recording_without_geo(self):
+        s = self.record((1.0, 1.0), [])
+        self.assertIsNone(s.header["geo"])
+        live = default_cfg()
+        live["geo"] = {"origin": [10.0, 10.0]}
+        self.assertIsNone(session_config(live, s)["geo"])
+        self.assertIn("Приймач: (1; 1) м, зона", describe(s))
+
     def test_default_radio_comes_from_config(self):
         self.assertEqual(self.record((1.0, 1.0), []).radio, {"sf": 12, "bw_khz": 125})
 
