@@ -55,18 +55,24 @@ def distance_to(truth, t):
 def make_header(cfg, truth, note=""):
     """Заголовок сесії: усе, що потрібно, щоб відтворити запис без config.json."""
     truth = float(truth[0]), float(truth[1])
+    frame = frame_from_config(cfg.get("geo"))
+    receiver = {"x": truth[0], "y": truth[1]}
+    if frame:
+        receiver["lat"], receiver["lon"] = (round(v, 8) for v in frame.to_latlon(*truth))
     return {
         "type": "header",
         "version": FORMAT_VERSION,
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "note": note,
+        "mode": cfg.get("mode", "local"),    # "local" — тестовий, "field" — бойовий
         "area": dict(cfg["area"]),
         "transmitters": [{"name": t.get("name", ""), "mac": t["mac"], "x": t["x"], "y": t["y"],
+                          **({"lat": t["lat"], "lon": t["lon"]} if "lat" in t else {}),
                           "distance": distance_to(truth, t)}
                          for t in cfg["transmitters"]],
-        "receiver_truth": {"x": truth[0], "y": truth[1]},
+        "receiver_truth": receiver,
         "radio": dict(cfg["radio"]),         # SF і ширина каналу, з якими прошиті маяки (опис запису)
-        "geo": cfg.get("geo"),               # прив’язка мапи до широти/довготи (None — немає)
+        "geo": cfg.get("geo"),               # сітка мапи відносно широти/довготи (None — тестовий режим)
         "signal": dict(cfg["signal"]),       # калібрування на момент запису (довідково)
         "baud": cfg["baud"],
         "default_tx_power_dbm": cfg["default_tx_power_dbm"],
@@ -176,6 +182,7 @@ def describe(session, default_txp=14):
         session.path,
         f"  Записано: {h.get('started_at', '—')}   тривалість {dur:.0f} с, пакетів {len(session.rx)}",
         f"  Опис: {h.get('note') or '—'}",
+        f"  Режим: {'бойовий (широта, довгота)' if h.get('mode') == 'field' else 'тестовий (метри)'}",
         f"  Радіо: {radio_label(session.radio) if session.radio else 'не вказано (старий запис)'}",
         f"  Приймач: ({session.truth[0]:g}; {session.truth[1]:g}) м{_latlon_suffix(h.get('geo'), session.truth)}, "
         f"зона {h['area']['width']:g} × {h['area']['height']:g} м",
@@ -228,6 +235,7 @@ def session_config(cfg, session):
     (калібрування, згладжування, вікно) — з поточного config.json, щоб їх можна було змінювати."""
     out = json.loads(json.dumps(cfg))
     out["area"] = dict(session.header["area"])
+    out["mode"] = session.header.get("mode", "local")
     out["geo"] = session.header.get("geo")     # координати маяків у записі відносно його прив’язки
     out["transmitters"] = [dict(t, x=float(t["x"]), y=float(t["y"])) for t in session.header["transmitters"]]
     return out
