@@ -4,6 +4,7 @@ import time
 from collections import deque
 
 from .config import save_config
+from .mapedit import beacon_at, remove_beacon, screen_to_world
 from .packetlog import PacketFeed, format_row
 from .solver import Locator
 
@@ -63,6 +64,10 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
     unknown_rects = []       # області рядків списку для натискання
     geo = {}                 # геометрія мапи з попереднього кадру
     msg, msg_t = "", 0.0
+    active = None            # вибраний зареєстрований маяк (для переміщення / видалення)
+    dragging = False         # маяк зараз тягнуть
+    drag_from = None         # де маяк був до перетягування (для Esc)
+    hand_cursor = False
 
     def text(surf, s, f, color, pos, anchor="topleft"):
         img = f.render(s, True, color)
@@ -84,10 +89,23 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
             if e.type == pygame.QUIT:
                 return
             if e.type == pygame.KEYDOWN:
-                if e.key == pygame.K_ESCAPE and selected:
+                if e.key == pygame.K_ESCAPE and dragging:
+                    active["x"], active["y"] = drag_from          # повернути, як було
+                    dragging = False
+                    last_calc = 0.0
+                elif e.key == pygame.K_ESCAPE and selected:
                     selected = None
+                elif e.key == pygame.K_ESCAPE and active:
+                    active = None
                 elif e.key in (pygame.K_ESCAPE, pygame.K_q):
                     return
+                elif e.key in (pygame.K_DELETE, pygame.K_BACKSPACE) and active and not dragging:
+                    remove_beacon(cfg, active["mac"])
+                    save_config(cfg_path, cfg)
+                    msg, msg_t = (f"Видалено {active.get('name')}: {active['mac']} — він знову в «Незареєстрованих»",
+                                  time.monotonic())
+                    active = None
+                    last_calc = 0.0
                 if e.key == pygame.K_f:
                     fullscreen = not fullscreen
                     open_window()
@@ -97,8 +115,14 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
                     show_log = not show_log
             if e.type == pygame.MOUSEBUTTONDOWN and e.button == 1 and geo and editable:
                 hit = next((mac for mac, r in unknown_rects if r.collidepoint(e.pos)), None)
+                grab = None if selected else beacon_at(e.pos, cfg["transmitters"], geo)
                 if hit:
                     selected = None if selected == hit else hit
+                    active = None
+                elif grab:
+                    active, dragging, drag_from = grab, True, (grab["x"], grab["y"])
+                elif not selected and geo["map"].collidepoint(e.pos):
+                    active = None                                   # клік по порожньому місцю
                 elif selected and geo["map"].collidepoint(e.pos):
                     wx = (e.pos[0] - geo["ox"]) / geo["scale"]
                     wy = (geo["oy"] - e.pos[1]) / geo["scale"]
@@ -112,6 +136,24 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
                         msg, msg_t = f"Зареєстровано {name}: {selected}  ({fmt(wx, 1)}; {fmt(wy, 1)} м)", time.monotonic()
                         selected = None
                         last_calc = 0.0
+            if e.type == pygame.MOUSEMOTION and geo and editable:
+                if dragging:
+                    active["x"], active["y"] = screen_to_world(e.pos, geo)
+                    last_calc = 0.0
+                over = dragging or (not selected and beacon_at(e.pos, cfg["transmitters"], geo) is not None)
+                if over != hand_cursor:
+                    hand_cursor = over
+                    try:
+                        pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_HAND if over else pygame.SYSTEM_CURSOR_ARROW)
+                    except (AttributeError, pygame.error):
+                        pass
+            if e.type == pygame.MOUSEBUTTONUP and e.button == 1 and dragging:
+                dragging = False
+                if (active["x"], active["y"]) != drag_from:
+                    save_config(cfg_path, cfg)
+                    trail.clear()
+                    msg, msg_t = (f"Переміщено {active.get('name')}: ({fmt(active['x'], 1)}; {fmt(active['y'], 1)} м)",
+                                  time.monotonic())
 
         now = time.monotonic()
         feed.update(cfg["transmitters"])
@@ -181,6 +223,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
             pygame.draw.circle(screen, mix(PAPER, EST, 0.1 + 0.4 * i / len(trail)), P(*p), 3)
         for t, r, d in loc.rows:
             c = P(t["x"], t["y"])
+            if t is active:
+                pygame.draw.circle(screen, EST, c, 15, 2)
             pygame.draw.circle(screen, TX if r is not None else mix(PAPER, TX, 0.35), c, 9)
             pygame.draw.circle(screen, PAPER, c, 9, 2)
             label = f"{t.get('name') or t['mac'][-5:]}  " + (f"{r['rssi']:.0f} дБм" if r else "немає")
@@ -200,8 +244,14 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         if selected:
             text(screen, f"Клацніть на мапі, де стоїть {selected}   (Esc — скасувати)", f_txt, EST,
                  (map_rect.x + 16, map_rect.y + 6))
+        elif dragging:
+            text(screen, f"{active.get('name')}: ({fmt(active['x'], 1)}; {fmt(active['y'], 1)} м)   (Esc — повернути)",
+                 f_txt, EST, (map_rect.x + 16, map_rect.y + 6))
         elif msg and now - msg_t < 5:
             text(screen, msg, f_txt, TX, (map_rect.x + 16, map_rect.y + 6))
+        elif active:
+            text(screen, f"{active.get('name')} вибрано: перетягніть, щоб перемістити   Delete — видалити   Esc — зняти",
+                 f_small, EST, (map_rect.x + 16, map_rect.y + 8))
         elif banner:
             text(screen, banner, f_txt, TRUTH if truth else TX, (map_rect.x + 16, map_rect.y + 6))
 
@@ -252,6 +302,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
                 snr = f"   SNR {fmt(r['snr'], 0)}" if r["snr"] is not None else ""
                 text(screen, f"{r['rssi']:.0f} дБм{snr}   {fmt(d, 1)} м   пак.: {r['n']}", f_small, MUTED, (x, y))
             y += 24
+        if editable and cfg["transmitters"]:
+            text(screen, "Маяк можна перетягнути на мапі", f_small, MUTED, (x, y - 4)); y += 16
         unknown_rects = []
         if loc.unknown:
             y += 4
