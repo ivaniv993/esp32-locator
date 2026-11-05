@@ -5,7 +5,7 @@ import os
 import sys
 import time
 
-from .config import CONFIG_PATH, load_config, save_config
+from .config import CONFIG_PATH, MODES, field_spread_warning, load_config, save_config
 from .evaluate import (collect_paths, compare, evaluate_files, format_report, load_baseline,
                        save_baseline)
 from .geo import format_latlon, frame_from_config, parse_latlon
@@ -28,34 +28,52 @@ def parse_xy(pair):
         sys.exit("Координати мають бути числами, наприклад 2.5")
 
 
-def add_beacon(cfg, mac, x, y, name=None):
-    """Реєструє маяк або оновлює координати наявного; попереджає, якщо він поза зоною мапи."""
+def add_beacon(cfg, mac, name=None, **coords):
+    """Реєструє маяк або оновлює координати наявного. coords — x, y (тестовий режим) або lat, lon (бойовий)."""
+    shown = ", ".join(f"{v}" for v in coords.values())
     tx = next((t for t in cfg["transmitters"] if t["mac"] == mac), None)
     if tx:
-        tx.update(x=x, y=y)
+        tx.update(coords)
         if name:
             tx["name"] = name
-        print(f"Оновлено {mac} -> ({x}; {y})")
+        print(f"Оновлено {mac} -> ({shown})")
     else:
-        cfg["transmitters"].append({"name": name or chr(65 + len(cfg["transmitters"])),
-                                    "mac": mac, "x": x, "y": y})
-        print(f"Зареєстровано {mac} -> ({x}; {y})")
-    aw, ah = cfg["area"]["width"], cfg["area"]["height"]
-    if not (0 <= x <= aw and 0 <= y <= ah):
-        print(f"Увага: маяк поза зоною мапи 0…{aw:g} × 0…{ah:g} м. Збільшіть area або змініть geo.origin, "
-              f"інакше його не буде видно на екрані.")
+        cfg["transmitters"].append({"name": name or chr(65 + len(cfg["transmitters"])), "mac": mac, **coords})
+        print(f"Зареєстровано {mac} -> ({shown})")
+    if "x" in coords:
+        aw, ah = cfg["area"]["width"], cfg["area"]["height"]
+        if not (0 <= coords["x"] <= aw and 0 <= coords["y"] <= ah):
+            print(f"Увага: маяк поза зоною мапи 0…{aw:g} × 0…{ah:g} м. Збільшіть area, "
+                  f"інакше його не буде видно на екрані.")
+
+
+def parse_truth(cfg, raw):
+    """Справжнє положення приймача для --record: метри (тестовий режим) або широта й довгота (бойовий)."""
+    if cfg["mode"] != "field":
+        return parse_xy(raw)
+    try:
+        lat, lon = parse_latlon(*raw)
+    except ValueError as e:
+        sys.exit(f"--truth: {e}. У бойовому режимі вкажіть широту й довготу приймача.")
+    return frame_from_config(cfg["geo"]).to_local(lat, lon)
 
 
 def record(cfg, args):
     """Записує сесію: пакети від приймача + справжні положення маяків і приймача (він стоїть на місці)."""
+    field = cfg["mode"] == "field"
     if not args.truth:
-        sys.exit("Вкажіть, де стоїть приймач: --record --truth X Y  (метри, від кута (0, 0) мапи)")
+        sys.exit("Вкажіть, де стоїть приймач: --record --truth " +
+                 ("ШИРОТА ДОВГОТА" if field else "X Y  (метри, від кута (0, 0) мапи)"))
     if not cfg["transmitters"]:
-        sys.exit("Немає зареєстрованих маяків. Додайте: locator.py --add ID X Y")
-    truth = parse_xy(args.truth)
+        sys.exit("Немає зареєстрованих маяків. Додайте: locator.py " + ("--add-geo ID ШИРОТА ДОВГОТА" if field else "--add ID X Y"))
+    truth = parse_truth(cfg, args.truth)
     aw, ah = cfg["area"]["width"], cfg["area"]["height"]
     if not (0 <= truth[0] <= aw and 0 <= truth[1] <= ah):
+        if field:
+            sys.exit(f"Приймач далі ніж field_margin_m ({cfg['field_margin_m']:g} м) від прямокутника навколо маяків. "
+                     f"Перевірте --truth або збільште field_margin_m.")
         sys.exit(f"Приймач ({truth[0]}; {truth[1]}) поза зоною {aw} × {ah} м (параметр area у config.json)")
+    truth = round(truth[0], 2), round(truth[1], 2)
     if len(cfg["transmitters"]) < 3:
         print("Увага: маяків менше 3 — за таким записом положення не визначити.")
     # приймач не повідомляє SF, тож записуємо те, що вказано (--sf/--bw або radio у config.json)
@@ -75,9 +93,9 @@ def record(cfg, args):
     reader.start()
     radio = radio_label(cfg["radio"])
     src = "--sf" if args.sf is not None else "radio у config.json"
-    geo = frame_from_config(cfg.get("geo"))
-    latlon = f" ({format_latlon(*geo.to_latlon(*truth))})" if geo else ""
-    print(f"Запис у {path}\nПриймач: ({truth[0]}; {truth[1]}) м{latlon}, маяків: {len(cfg['transmitters'])}.")
+    rt = header["receiver_truth"]
+    where = format_latlon(rt["lat"], rt["lon"]) if "lat" in rt else f"({truth[0]}; {truth[1]}) м"
+    print(f"Запис у {path}\nРежим: {MODES[cfg['mode']]}. Приймач: {where}, маяків: {len(cfg['transmitters'])}.")
     print(f"Радіо: {radio} (з {src} — якщо маяки прошито інакше, зупиніть і вкажіть --sf)")
     print("Відстані до маяків: " + ", ".join(f"{t['name'] or t['mac'][-4:]} {t['distance']:.1f} м"
                                               for t in header["transmitters"]))
@@ -206,9 +224,9 @@ def main():
     ap = argparse.ArgumentParser(description="Позиціонування приймача за LoRa-маяками")
     ap.add_argument("--config", default=CONFIG_PATH, help="шлях до config.json")
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--add", nargs=3, metavar=("ID", "X", "Y"), help="зареєструвати або оновити маяк")
+    g.add_argument("--add", nargs=3, metavar=("ID", "X", "Y"), help="тестовий режим: зареєструвати або оновити маяк, м")
     g.add_argument("--add-geo", nargs=3, metavar=("ID", "LAT", "LON"),
-                   help="зареєструвати маяк за широтою й довготою (потрібен розділ geo в config.json)")
+                   help="бойовий режим: зареєструвати або оновити маяк за широтою й довготою")
     g.add_argument("--remove", metavar="ID", help="видалити маяк")
     g.add_argument("--list", action="store_true", help="показати маяки")
     g.add_argument("--calibrate", action="store_true", help="режим калібрування")
@@ -217,7 +235,8 @@ def main():
     g.add_argument("--evaluate", nargs="+", metavar="FILE", help="оцінити алгоритм на записах (файли або папка)")
     ap.add_argument("--baseline", metavar="JSON", help="--evaluate: порівняти з раніше збереженим результатом")
     ap.add_argument("--save", metavar="JSON", help="--evaluate: зберегти результат для наступних порівнянь")
-    ap.add_argument("--truth", nargs=2, metavar=("X", "Y"), help="де стоїть приймач під час --record, м")
+    ap.add_argument("--truth", nargs=2, metavar=("X", "Y"),
+                    help="де стоїть приймач під час --record: метри (тестовий режим) або широта й довгота (бойовий)")
     ap.add_argument("--note", help="коментар до запису (--record)")
     ap.add_argument("--sf", type=int, choices=range(5, 13), metavar="5-12",
                     help="--record: spreading factor, з яким прошиті маяки (інакше radio.sf з config.json)")
@@ -231,30 +250,37 @@ def main():
     ap.add_argument("--port", help="порт приймача, наприклад /dev/ttyUSB0 або /dev/ttyS5")
     args = ap.parse_args()
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except ValueError as e:
+        sys.exit(f"Помилка в {args.config}: {e}")
     if args.port:
         cfg["serial_port"] = args.port
-    try:
-        geo = frame_from_config(cfg.get("geo"))
-    except ValueError as e:
-        sys.exit(f"Помилка в config.json, розділ geo: {e}")
+    field = cfg["mode"] == "field"
 
     if args.add or args.add_geo:
-        raw_id = (args.add or args.add_geo)[0]
-        mac = norm_mac(raw_id)
+        mac = norm_mac((args.add or args.add_geo)[0])
         if not mac:
             sys.exit("Неправильний ID. Приклад: A1B2C3D4E5F6")
+        if args.add and field:
+            sys.exit("У бойовому режимі маяки задаються широтою й довготою: --add-geo ID ШИРОТА ДОВГОТА")
+        if args.add_geo and not field:
+            sys.exit('Широта й довгота — для бойового режиму: вкажіть "mode": "field" у config.json. '
+                     "У тестовому режимі: --add ID X Y (метри)")
         if args.add:
             x, y = parse_xy(args.add[1:])
+            add_beacon(cfg, mac, args.name, x=x, y=y)
         else:
-            if not geo:
-                sys.exit('Мапу не прив’язано до місцевості: додайте в config.json розділ "geo" (див. README).')
             try:
-                x, y = (round(v, 2) for v in geo.to_local(*parse_latlon(*args.add_geo[1:])))
+                lat, lon = parse_latlon(*args.add_geo[1:])
             except ValueError as e:
                 sys.exit(f"Помилка: {e}")
-        add_beacon(cfg, mac, x, y, args.name)
+            add_beacon(cfg, mac, args.name, lat=lat, lon=lon)
         save_config(args.config, cfg)
+        if field:
+            warning = field_spread_warning(load_config(args.config))
+            if warning:
+                print(warning)
     elif args.remove:
         mac = norm_mac(args.remove)
         before = len(cfg["transmitters"])
@@ -262,11 +288,17 @@ def main():
         save_config(args.config, cfg)
         print("Видалено" if len(cfg["transmitters"]) < before else "Такого ID немає в списку")
     elif args.list:
+        print(f"Режим: {MODES[cfg['mode']]}")
         for t in cfg["transmitters"]:
-            latlon = f"  ({format_latlon(*geo.to_latlon(t['x'], t['y']))})" if geo else ""
-            print(f"{t.get('name', ''):>3}  {t['mac']}  x={t['x']}  y={t['y']}{latlon}")
+            if field:
+                print(f"{t.get('name', ''):>3}  {t['mac']}  {format_latlon(t['lat'], t['lon'])}"
+                      f"  (на мапі x={t['x']:g}, y={t['y']:g} м)")
+            else:
+                print(f"{t.get('name', ''):>3}  {t['mac']}  x={t['x']}  y={t['y']}")
         if not cfg["transmitters"]:
-            print("Список порожній. Додайте: locator.py --add ID X Y")
+            print("Список порожній. Додайте: locator.py " + ("--add-geo ID ШИРОТА ДОВГОТА" if field else "--add ID X Y"))
+        elif field and field_spread_warning(cfg):
+            print(field_spread_warning(cfg))
     elif args.ports:
         list_ports()
     elif args.calibrate:

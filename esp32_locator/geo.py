@@ -66,8 +66,9 @@ def field_frame(points, margin):
     lat0, lon0 = sw.to_latlon(-margin, -margin)
     frame = GeoFrame(lat0, lon0, 90.0)
     xy = [frame.to_local(*p) for p in points]
-    width = math.ceil(max(x for x, _ in xy) + margin)
-    height = math.ceil(max(y for _, y in xy) + margin)
+    # round перед ceil: частки міліметра від переходу до іншої широти не мають додавати цілий метр
+    width = math.ceil(round(max(x for x, _ in xy) + margin, 2))
+    height = math.ceil(round(max(y for _, y in xy) + margin, 2))
     return {"origin": [round(lat0, 8), round(lon0, 8)], "x_bearing_deg": 90.0}, width, height
 
 

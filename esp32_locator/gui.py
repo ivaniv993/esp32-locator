@@ -5,7 +5,7 @@ from collections import deque
 
 from .config import save_config
 from .mapedit import beacon_at, remove_beacon, screen_to_world
-from .geo import format_latlon, frame_from_config
+from .geo import frame_from_config
 from .packetlog import PacketFeed, format_row
 from .solver import Locator
 
@@ -37,10 +37,11 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
     import pygame
 
     loc = Locator(cfg, readings)
-    geo_frame = frame_from_config(cfg.get("geo"))   # None — мапу не прив’язано до місцевості; перевіряє викликач
+    geo_frame = frame_from_config(cfg.get("geo"))   # бойовий режим (широта/довгота) або None — тестовий
     feed = PacketFeed(readings)      # журнал пакетів; порожній, якщо Readings створено без keep_recent
     show_log = True
-    editable = cfg_path is not None
+    # маяки мишею редагуються лише в тестовому режимі: у бойовому їх задають широтою й довготою (--add-geo)
+    editable = cfg_path is not None and geo_frame is None
 
     pygame.display.init()   # без звуку: аудіо не потрібне
     pygame.font.init()
@@ -242,6 +243,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
             c = P(*truth)
             pygame.draw.rect(screen, TRUTH, (c[0] - 9, c[1] - 9, 18, 18), 2)
             text(screen, "справжнє", f_small, TRUTH, (c[0], c[1] + 14), "midtop")
+        if geo_frame:  # у бойовому режимі мапа завжди північчю вгору
+            text(screen, "Пн ↑", f_txt, MUTED, (map_rect.right - 12, map_rect.y + 6), "topright")
 
         if selected:
             text(screen, f"Клацніть на мапі, де стоїть {selected}   (Esc — скасувати)", f_txt, EST,
@@ -277,17 +280,21 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         # --- панель
         pygame.draw.rect(screen, PAPER, panel)
         x, y = panel.x + 18, panel.y + 16
-        text(screen, "Положення приймача", f_txt, MUTED, (x, y)); y += 24
+        text(screen, "Положення приймача" + (" (широта, довгота)" if geo_frame else ""), f_txt, MUTED, (x, y))
+        y += 24
         if loc.pos:
-            text(screen, f"x = {fmt(loc.pos[0])} м", f_big, EST, (x, y)); y += 32
-            text(screen, f"y = {fmt(loc.pos[1])} м", f_big, EST, (x, y)); y += 34
             if geo_frame:
-                text(screen, format_latlon(*geo_frame.to_latlon(*loc.pos)), f_txt, EST, (x, y)); y += 22
+                lat, lon = geo_frame.to_latlon(*loc.pos)
+                text(screen, f"{lat:.6f}", f_big, EST, (x, y)); y += 32
+                text(screen, f"{lon:.6f}", f_big, EST, (x, y)); y += 34
+            else:
+                text(screen, f"x = {fmt(loc.pos[0])} м", f_big, EST, (x, y)); y += 32
+                text(screen, f"y = {fmt(loc.pos[1])} м", f_big, EST, (x, y)); y += 34
             text(screen, f"Узгодженість вимірів: ±{fmt(loc.rms, 1)} м", f_small, MUTED, (x, y)); y += 22
             if truth:
                 err = math.hypot(loc.pos[0] - truth[0], loc.pos[1] - truth[1])
-                text(screen, f"Похибка: {fmt(err, 2)} м  (справжнє {fmt(truth[0], 1)}; {fmt(truth[1], 1)})",
-                     f_small, TRUTH, (x, y)); y += 22
+                where = "" if geo_frame else f"  (справжнє {fmt(truth[0], 1)}; {fmt(truth[1], 1)})"
+                text(screen, f"Похибка: {fmt(err, 2)} м{where}", f_small, TRUTH, (x, y)); y += 22
         else:
             text(screen, "невідоме", f_big, MUTED, (x, y)); y += 40
         if loc.heard < 3:
@@ -324,6 +331,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
                 unknown_rects.append((mac, row))
             if editable and not selected:
                 text(screen, "Торкніться ID, щоб розмістити на мапі", f_small, MUTED, (x, y + 2))
+            elif geo_frame and cfg_path is not None:
+                text(screen, "Додайте: --add-geo ID ШИРОТА ДОВГОТА", f_small, MUTED, (x, y + 2))
         by = panel.bottom - 16
         text(screen, "L — журнал пакетів   Q — вихід", f_small, MUTED, (x, by), "bottomleft")
         text(screen, "F — повний екран   C — очистити слід", f_small, MUTED, (x, by - 18), "bottomleft")
