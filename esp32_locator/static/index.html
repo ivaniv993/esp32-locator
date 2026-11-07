@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LoRa-локатор</title>
+<style>
+  :root {
+    --bg: #0e1522; --paper: #162032; --grid: #1f2c41; --major: #2e3e58; --ink: #e3e9f0; --muted: #96a5b8;
+    --tx: #3fc4cc; --est: #ff6f9c; --warn: #f0b35a; --truth: #7cde86; --danger: #ff6b6b;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { display: flex; align-items: center; gap: 10px; padding: 10px 16px; position: sticky; top: 0;
+    background: var(--bg); z-index: 5; border-bottom: 1px solid var(--grid); }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.ok { background: var(--truth); } .dot.bad { background: var(--danger); }
+  .chip { font-size: 12px; color: var(--muted); border: 1px solid var(--major); border-radius: 99px; padding: 2px 8px; }
+  main { max-width: 1100px; margin: 0 auto; padding: 0 16px 32px; display: grid; gap: 14px; }
+  @media (min-width: 900px) { main { grid-template-columns: 1fr 360px; align-items: start; } #mapbox { grid-row: span 4; } }
+  #mapbox { position: relative; background: var(--paper); border-radius: 12px; overflow: hidden; margin-top: 14px; }
+  canvas { display: block; width: 100%; height: 62vh; min-height: 240px; touch-action: none; }
+  #banner { position: absolute; left: 10px; right: 10px; top: 10px; padding: 8px 12px; border-radius: 8px;
+    background: rgba(14,21,34,.88); color: var(--est); display: none; font-size: 14px; }
+  section { background: var(--paper); border-radius: 12px; padding: 14px 16px; }
+  section h2 { font-size: 13px; color: var(--muted); font-weight: 500; margin: 0 0 8px; text-transform: uppercase; letter-spacing: .04em; }
+  .big { font-size: 28px; font-weight: 700; color: var(--est); font-variant-numeric: tabular-nums; line-height: 1.2; user-select: all; }
+  .muted { color: var(--muted); } .warn { color: var(--warn); } .ok { color: var(--truth); } .err { color: var(--danger); }
+  .small { font-size: 13px; }
+  .row { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--grid); }
+  .row:first-of-type { border-top: 0; }
+  .row .grow { flex: 1; min-width: 0; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; overflow-wrap: anywhere; }
+  button { font: inherit; color: var(--ink); background: var(--major); border: 0; border-radius: 8px; padding: 10px 14px;
+    min-height: 44px; cursor: pointer; }
+  button.primary { background: var(--tx); color: #062226; font-weight: 600; }
+  button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  button.ghost { background: transparent; border: 1px solid var(--major); }
+  button:disabled { opacity: .5; }
+  details summary { cursor: pointer; color: var(--muted); }
+  #log { max-height: 240px; overflow: auto; margin-top: 8px; }
+  #log div { white-space: pre; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); }
+  #log div.unknown { color: var(--warn); }
+  dialog { background: var(--paper); color: var(--ink); border: 1px solid var(--major); border-radius: 14px; padding: 18px;
+    width: min(440px, calc(100vw - 32px)); }
+  dialog::backdrop { background: rgba(0,0,0,.55); }
+  dialog h3 { margin: 0 0 12px; font-size: 17px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--major); border-radius: 8px;
+    padding: 10px 12px; min-height: 44px; }
+  input:read-only { color: var(--muted); }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .actions { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  .actions .grow { flex: 1; }
+  #gpsinfo { font-size: 13px; margin-top: 6px; min-height: 18px; }
+  #toast { position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%); background: var(--major); color: var(--ink);
+    padding: 10px 16px; border-radius: 10px; display: none; z-index: 20; max-width: calc(100vw - 32px); }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="conn"></span>
+  <h1>LoRa-локатор</h1>
+  <span class="chip" id="mode">—</span>
+</header>
+<main>
+  <div id="mapbox"><canvas id="map"></canvas><div id="banner"></div></div>
+
+  <section>
+    <h2 id="poslabel">Положення приймача</h2>
+    <div id="pos" class="big muted">невідоме</div>
+    <div id="posinfo" class="small muted"></div>
+  </section>
+
+  <section>
+    <h2>Маяки</h2>
+    <div id="beacons"></div>
+    <div id="unknownbox" style="display:none">
+      <h2 style="margin-top:14px" class="warn">Незареєстровані</h2>
+      <div id="unknown"></div>
+    </div>
+    <div class="actions" id="addbox" style="display:none"><button class="ghost grow" id="addbtn">Додати маяк за ID</button></div>
+  </section>
+
+  <section>
+    <h2>Стан</h2>
+    <div id="status" class="small muted"></div>
+    <div id="link" class="small"></div>
+    <details><summary class="small">Журнал пакетів</summary><div id="log"></div></details>
+  </section>
+</main>
+
+<dialog id="editor">
+  <form method="dialog" id="form">
+    <h3 id="edtitle">Маяк</h3>
+    <label for="f-mac">ID маяка</label>
+    <input id="f-mac" autocomplete="off" autocapitalize="characters" placeholder="A1B2C3D4E5F6" required>
+    <label for="f-name">Назва (необов’язково)</label>
+    <input id="f-name" maxlength="12" autocomplete="off" placeholder="A">
+    <div id="geofields">
+      <div class="two">
+        <div><label for="f-lat">Широта</label><input id="f-lat" inputmode="decimal" placeholder="50.450100"></div>
+        <div><label for="f-lon">Довгота</label><input id="f-lon" inputmode="decimal" placeholder="30.523400"></div>
+      </div>
+      <div class="actions" id="gpsbox" style="display:none">
+        <button type="button" class="ghost grow" id="gpsbtn">📍 Маяк тут (GPS телефона)</button>
+      </div>
+      <div id="gpsinfo" class="muted"></div>
+    </div>
+    <div id="xyfields">
+      <div class="two">
+        <div><label for="f-x">x, м</label><input id="f-x" inputmode="decimal"></div>
+        <div><label for="f-y">y, м</label><input id="f-y" inputmode="decimal"></div>
+      </div>
+      <div class="small muted" style="margin-top:6px">Або перетягніть маяк на мапі.</div>
+    </div>
+    <div id="pinbox" style="display:none">
+      <label for="f-pin">PIN</label><input id="f-pin" type="password" inputmode="numeric" autocomplete="off">
+    </div>
+    <div id="ederr" class="err small" style="margin-top:8px"></div>
+    <div class="actions">
+      <button type="button" class="danger" id="delbtn">Видалити</button>
+      <span class="grow"></span>
+      <button type="button" class="ghost" id="cancelbtn">Скасувати</button>
+      <button type="submit" class="primary" id="savebtn">Зберегти</button>
+    </div>
+  </form>
+</dialog>
+<div id="toast"></div>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const C = { paper: css("--paper"), grid: css("--grid"), major: css("--major"), ink: css("--ink"), muted: css("--muted"),
+            tx: css("--tx"), est: css("--est"), warn: css("--warn"), truth: css("--truth") };
+let S = null;            // останній стан з Pi
+let lastOk = 0;
+let geo = null;          // геометрія мапи для перерахунку дотиків
+let drag = null;         // {mac, x, y} — маяк, який тягнуть (тестовий режим)
+let pick = null;         // {mac} — незареєстрований маяк, для якого вибирають місце на мапі (тестовий режим)
+let editing = null;      // {mac, existing}
+let gpsWatch = null;
+
+const store = {          // PIN пам’ятаємо лише в цьому браузері; сховище може бути недоступне
+  get(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} },
+};
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const fmt = (v, n = 1) => v == null ? "—" : Number(v).toFixed(n).replace(".", ",");
+const field = () => S && S.mode === "field";
+
+function toast(msg, ms = 3500) {
+  const t = $("toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.style.display = "none", ms);
+}
+
+// ------------------------------------------------------------ стан з Pi
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    const s = await r.json(); lastOk = Date.now();
+    if (s.beacons) { S = s; render(); }        // до першого перерахунку положення стан порожній
+  } catch (e) { /* зв’язок перевіряється нижче */ }
+  $("conn").className = "dot " + (Date.now() - lastOk < 3000 ? "ok" : "bad");
+  if (Date.now() - lastOk >= 3000) $("status").innerHTML = '<span class="err">Немає зв’язку з Raspberry Pi</span>';
+  setTimeout(poll, 500);
+}
+
+function keyed(el, key, html) {          // перебудовує вміст, лише коли змінився key
+  if (el.dataset.key === key) return;
+  el.dataset.key = key; el.innerHTML = html();
+}
+
+function render() {
+  $("mode").textContent = field() ? "бойовий режим" : "тестовий режим";
+  const rc = S.receiver;
+  $("poslabel").textContent = field() ? "Положення приймача (широта, довгота)" : "Положення приймача";
+  if (rc && rc.fix) {
+    $("pos").className = "big";
+    $("pos").innerHTML = field() && rc.latlon
+      ? `${rc.latlon[0].toFixed(6)}<br>${rc.latlon[1].toFixed(6)}`
+      : `x = ${fmt(rc.x, 2)} м<br>y = ${fmt(rc.y, 2)} м`;
+    let info = `Узгодженість вимірів ±${fmt(rc.rms)} м · чути маяків: ${S.heard}`;
+    if (S.truth) info += ` · похибка ${fmt(Math.hypot(rc.x - S.truth[0], rc.y - S.truth[1]), 2)} м`;
+    $("posinfo").innerHTML = esc(info);
+  } else {
+    $("pos").className = "big muted"; $("pos").textContent = "невідоме";
+    $("posinfo").innerHTML = `<span class="warn">Чути маяків: ${S.heard} з ${S.beacons.length}. Потрібно щонайменше 3.</span>`;
+  }
+
+  // Рядки й кнопки перебудовуються лише при зміні складу маяків, інакше оновлюються лише цифри:
+  // якби кнопка перестворювалась кожні пів секунди, натискання на телефоні губилися б.
+  const ed = S.editable;
+  keyed($("beacons"), JSON.stringify([ed, S.mode, S.beacons.map(b => [b.mac, b.name, b.latlon])]), () =>
+    S.beacons.length ? S.beacons.map(b => `
+    <div class="row">
+      <div class="grow">
+        <div><b>${esc(b.name || "—")}</b> <span class="mono muted">${esc(b.mac)}</span></div>
+        <div class="small" data-info="${esc(b.mac)}"></div>
+        ${field() && b.latlon ? `<div class="small mono muted">${b.latlon[0].toFixed(6)}, ${b.latlon[1].toFixed(6)}</div>` : ""}
+      </div>
+      ${ed ? `<button class="ghost" data-edit="${esc(b.mac)}">Змінити</button>` : ""}
+    </div>`).join("") : '<div class="muted small">Маяків ще немає.</div>');
+  for (const b of S.beacons) {
+    const el = $("beacons").querySelector(`[data-info="${CSS.escape(b.mac)}"]`);
+    if (!el) continue;
+    el.className = "small " + (b.rssi == null ? "warn" : "muted");
+    el.textContent = b.rssi == null ? "немає сигналу"
+      : `${fmt(b.rssi, 0)} дБм${b.snr == null ? "" : ` · SNR ${fmt(b.snr, 0)}`} · ${fmt(b.distance)} м · пак.: ${b.packets}`;
+  }
+
+  $("unknownbox").style.display = S.unknown.length ? "" : "none";
+  keyed($("unknown"), JSON.stringify([ed, S.mode, S.unknown.map(u => u.mac)]), () => S.unknown.map(u => `
+    <div class="row">
+      <div class="grow"><div class="mono">${esc(u.mac)}</div>
+        <div class="small muted" data-info="${esc(u.mac)}"></div></div>
+      ${ed ? `<button class="primary" data-add="${esc(u.mac)}">${field() ? "Додати" : "На мапу"}</button>` : ""}
+    </div>`).join(""));
+  for (const u of S.unknown) {
+    const el = $("unknown").querySelector(`[data-info="${CSS.escape(u.mac)}"]`);
+    if (el) el.textContent = `${fmt(u.rssi, 0)} дБм · ~${fmt(u.distance)} м`;
+  }
+  $("addbox").style.display = ed ? "" : "none";
+
+  $("status").innerHTML = esc(`${S.status} · ${fmt(S.rate, 0)} пак./с`) + (ed ? "" : ' · <span class="warn">лише перегляд</span>');
+  $("link").innerHTML = S.link ? `<span class="${S.link.includes("зв’язок є") ? "ok" : "warn"}">${esc(S.link)}</span>` : "";
+  const log = $("log"), atBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 4;
+  log.innerHTML = S.log.map(r => `<div class="${r.known ? "" : "unknown"}">${esc(r.text)}</div>`).join("");
+  if (atBottom) log.scrollTop = log.scrollHeight;
+  draw();
+}
+
+// ------------------------------------------------------------ мапа
+function draw() {
+  const cv = $("map"), dpr = window.devicePixelRatio || 1;
+  if (S) {                                 // висота під пропорції зони: без порожніх смуг над і під мапою
+    const want = Math.round(Math.min(window.innerHeight * 0.7,
+      Math.max(240, cv.clientWidth * Math.max(S.area.height, 1) / Math.max(S.area.width, 1) + 60)));
+    if (Math.abs(cv.clientHeight - want) > 2) cv.style.height = want + "px";
+  }
+  const W = cv.clientWidth, H = cv.clientHeight;
+  if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) { cv.width = Math.round(W * dpr); cv.height = Math.round(H * dpr); }
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  if (!S) return;
+  const aw = Math.max(S.area.width, 1), ah = Math.max(S.area.height, 1), pad = 30;
+  const scale = Math.min((W - 2 * pad) / aw, (H - 2 * pad) / ah);
+  const ox = (W - aw * scale) / 2, oy = (H + ah * scale) / 2;
+  geo = { ox, oy, scale, aw, ah };
+  const P = (x, y) => [ox + x * scale, oy - y * scale];
+
+  const step = scale >= 12 ? 1 : scale >= 3 ? 5 : 10, major = step === 1 ? 5 : step * 2;
+  g.font = "11px system-ui, sans-serif"; g.lineWidth = 1;
+  for (let x = 0; x <= aw + 1e-9; x += step) {
+    const m = Math.round(x) % major === 0; g.strokeStyle = m ? C.major : C.grid;
+    g.beginPath(); g.moveTo(...P(x, 0)); g.lineTo(...P(x, ah)); g.stroke();
+    if (m) { g.fillStyle = C.muted; g.textAlign = "center"; g.fillText(Math.round(x), P(x, 0)[0], P(x, 0)[1] + 14); }
+  }
+  for (let y = 0; y <= ah + 1e-9; y += step) {
+    const m = Math.round(y) % major === 0; g.strokeStyle = m ? C.major : C.grid;
+    g.beginPath(); g.moveTo(...P(0, y)); g.lineTo(...P(aw, y)); g.stroke();
+    if (m && y > 0) { g.fillStyle = C.muted; g.textAlign = "right"; g.fillText(Math.round(y), P(0, y)[0] - 5, P(0, y)[1] + 4); }
+  }
+  g.textAlign = "left"; g.fillStyle = C.muted; g.fillText("м", P(aw, 0)[0] + 14, P(aw, 0)[1] + 14);
+  if (field()) { g.font = "600 13px system-ui, sans-serif"; g.textAlign = "right"; g.fillText("Пн ↑", W - 10, 20); }
+
+  const beacons = S.beacons.map(b => drag && drag.mac === b.mac ? { ...b, x: drag.x, y: drag.y } : b);
+  g.setLineDash([5, 5]); g.strokeStyle = C.tx + "88";
+  for (const b of beacons) if (b.distance != null) {
+    g.beginPath(); g.arc(...P(b.x, b.y), Math.min(b.distance * scale, 4000), 0, 2 * Math.PI); g.stroke();
+  }
+  g.setLineDash([]);
+  S.trail.forEach((p, i) => {
+    g.fillStyle = C.est; g.globalAlpha = .1 + .4 * i / S.trail.length;
+    g.beginPath(); g.arc(...P(p[0], p[1]), 3, 0, 2 * Math.PI); g.fill();
+  });
+  g.globalAlpha = 1;
+  g.font = "600 13px system-ui, sans-serif";
+  for (const b of beacons) {
+    const [x, y] = P(b.x, b.y);
+    g.fillStyle = b.rssi == null ? C.major : C.tx;
+    g.beginPath(); g.arc(x, y, 9, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = C.paper; g.lineWidth = 2; g.stroke(); g.lineWidth = 1;
+    const right = x > W - 110;
+    g.fillStyle = C.ink; g.textAlign = right ? "right" : "left";
+    g.fillText(`${b.name || b.mac.slice(-5)}  ${b.rssi == null ? "немає" : Math.round(b.rssi) + " дБм"}`, x + (right ? -14 : 14), y + 4);
+  }
+  if (S.truth) {
+    const [x, y] = P(S.truth[0], S.truth[1]);
+    g.strokeStyle = C.truth; g.lineWidth = 2; g.strokeRect(x - 9, y - 9, 18, 18); g.lineWidth = 1;
+  }
+  const rc = S.receiver;
+  if (rc && rc.fix) {
+    const [x, y] = P(Math.min(aw, Math.max(0, rc.x)), Math.min(ah, Math.max(0, rc.y)));
+    g.strokeStyle = C.est; g.lineWidth = 3;
+    g.beginPath(); g.arc(x, y, 14, 0, 2 * Math.PI); g.stroke();
+    g.lineWidth = 2; g.beginPath(); g.moveTo(x - 20, y); g.lineTo(x + 20, y); g.moveTo(x, y - 20); g.lineTo(x, y + 20); g.stroke();
+    g.lineWidth = 1;
+  }
+}
+
+function toWorld(ev) {
+  const r = $("map").getBoundingClientRect(), px = ev.clientX - r.left, py = ev.clientY - r.top;
+  const x = (px - geo.ox) / geo.scale, y = (geo.oy - py) / geo.scale;
+  return { px, py, x: Math.round(Math.min(geo.aw, Math.max(0, x)) * 10) / 10, y: Math.round(Math.min(geo.ah, Math.max(0, y)) * 10) / 10 };
+}
+function beaconAt(px, py) {
+  let best = null, bd = 26;                       // радіус із запасом для пальця
+  for (const b of S.beacons) {
+    const d = Math.hypot(px - (geo.ox + b.x * geo.scale), py - (geo.oy - b.y * geo.scale));
+    if (d <= bd) { best = b; bd = d; }
+  }
+  return best;
+}
+function banner(text) { const b = $("banner"); b.textContent = text || ""; b.style.display = text ? "block" : "none"; }
+
+$("map").addEventListener("pointerdown", ev => {
+  if (!S || !geo || !S.editable || field()) return;
+  const w = toWorld(ev);
+  if (pick) { saveBeacon({ mac: pick.mac, x: w.x, y: w.y }); pick = null; banner(""); return; }
+  const b = beaconAt(w.px, w.py);
+  if (b) { drag = { mac: b.mac, name: b.name, x: b.x, y: b.y, from: [b.x, b.y] }; $("map").setPointerCapture(ev.pointerId); }
+});
+$("map").addEventListener("pointermove", ev => {
+  if (!drag) return;
+  const w = toWorld(ev); drag.x = w.x; drag.y = w.y;
+  banner(`${drag.name || drag.mac}: ${fmt(w.x)}; ${fmt(w.y)} м`); draw();
+});
+$("map").addEventListener("pointerup", () => {
+  if (!drag) return;
+  const d = drag; drag = null; banner("");
+  if (d.x !== d.from[0] || d.y !== d.from[1]) saveBeacon({ mac: d.mac, x: d.x, y: d.y });
+});
+$("map").addEventListener("pointercancel", () => { drag = null; banner(""); draw(); });
+window.addEventListener("resize", draw);
+
+// ------------------------------------------------------------ зміни маяків
+async function post(url, data) {
+  if (S.pin_required) data.pin = data.pin || store.get("pin");
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) });
+  const res = await r.json().catch(() => ({ error: "Неправильна відповідь сервера" }));
+  if (r.status === 403) store.set("pin", "");
+  if (!r.ok) throw new Error(res.error || r.status);
+  return res;
+}
+async function saveBeacon(data) {
+  if (S.pin_required && !store.get("pin")) {
+    const pin = prompt("PIN для зміни маяків");
+    if (!pin) return;
+    store.set("pin", pin);
+  }
+  try {
+    const res = await post("/api/beacons", data);
+    toast(res.warning ? `${res.message}. ${res.warning}` : res.message, res.warning ? 8000 : 3500);
+  } catch (e) { toast("Не збережено: " + e.message, 6000); }
+}
+
+function openEditor(mac, existing) {
+  const b = existing ? S.beacons.find(b => b.mac === mac) : null;
+  editing = { mac, existing };
+  $("edtitle").textContent = existing ? `Маяк ${b.name || ""}` : "Новий маяк";
+  $("f-mac").value = mac || ""; $("f-mac").readOnly = !!existing;
+  $("f-name").value = b ? b.name : "";
+  $("geofields").style.display = field() ? "" : "none";
+  $("xyfields").style.display = field() ? "none" : "";
+  $("f-lat").value = b && b.latlon ? b.latlon[0].toFixed(7) : "";
+  $("f-lon").value = b && b.latlon ? b.latlon[1].toFixed(7) : "";
+  $("f-x").value = b ? b.x : ""; $("f-y").value = b ? b.y : "";
+  $("gpsbox").style.display = field() && window.isSecureContext && navigator.geolocation ? "" : "none";
+  $("gpsinfo").textContent = field() && !window.isSecureContext
+    ? "GPS телефона доступний лише через HTTPS (запуск з --web-https)." : "";
+  $("pinbox").style.display = S.pin_required ? "" : "none"; $("f-pin").value = store.get("pin");
+  $("delbtn").style.display = existing ? "" : "none";
+  $("ederr").textContent = "";
+  $("editor").showModal();
+}
+function closeEditor() { stopGps(); $("editor").close(); editing = null; }
+const num = s => Number(String(s).trim().replace(/[,;]$/, "").replace(",", "."));
+
+$("form").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  const data = { mac: $("f-mac").value.trim(), name: $("f-name").value.trim() };
+  if (S.pin_required) { data.pin = $("f-pin").value; store.set("pin", data.pin); }
+  if (field()) {
+    let lat = $("f-lat").value, lon = $("f-lon").value;
+    // вставили «50.4501, 30.5234» з карти в одне поле (десяткова крапка, роздільник — кома або пробіл)
+    const both = lat.match(/^\s*(-?\d+(?:\.\d+)?)\s*[,;\s]\s*(-?\d+(?:\.\d+)?)\s*$/);
+    if (!lon.trim() && both) [lat, lon] = [both[1], both[2]];
+    data.lat = num(lat); data.lon = num(lon);
+  } else { data.x = num($("f-x").value); data.y = num($("f-y").value); }
+  try {
+    const res = await post("/api/beacons", data);
+    closeEditor();
+    toast(res.warning ? `${res.message}. ${res.warning}` : res.message, res.warning ? 8000 : 3500);
+  } catch (e) { $("ederr").textContent = e.message; }
+});
+$("cancelbtn").addEventListener("click", closeEditor);
+$("delbtn").addEventListener("click", async () => {
+  if (!confirm(`Видалити маяк ${editing.mac}?`)) return;
+  try { const res = await post("/api/beacons/delete", { mac: editing.mac, pin: $("f-pin").value }); closeEditor(); toast(res.message); }
+  catch (e) { $("ederr").textContent = e.message; }
+});
+$("addbtn").addEventListener("click", () => openEditor("", false));
+document.addEventListener("click", ev => {
+  const t = ev.target.closest("button"); if (!t) return;
+  if (t.dataset.edit) openEditor(t.dataset.edit, true);
+  if (t.dataset.add) {
+    if (field()) openEditor(t.dataset.add, false);
+    else { pick = { mac: t.dataset.add }; banner(`Торкніться місця на мапі, де стоїть ${t.dataset.add}`); window.scrollTo({ top: 0, behavior: "smooth" }); }
+  }
+});
+
+// ------------------------------------------------------------ GPS телефона (лише HTTPS)
+function stopGps() {
+  if (gpsWatch != null) navigator.geolocation.clearWatch(gpsWatch);
+  gpsWatch = null; $("gpsbtn").textContent = "📍 Маяк тут (GPS телефона)";
+}
+$("gpsbtn").addEventListener("click", () => {
+  if (gpsWatch != null) { stopGps(); return; }
+  const samples = [], started = Date.now();
+  $("gpsbtn").textContent = "Зупинити й узяти середнє";
+  $("gpsinfo").textContent = "Чекаю GPS… тримайте телефон біля маяка.";
+  gpsWatch = navigator.geolocation.watchPosition(p => {
+    const c = p.coords; samples.push(c);
+    // середнє, зважене точністю кожного виміру (точніші важать більше)
+    let sw = 0, la = 0, lo = 0;
+    for (const s of samples) { const w = 1 / Math.max(s.accuracy, 1) ** 2; sw += w; la += w * s.latitude; lo += w * s.longitude; }
+    $("f-lat").value = (la / sw).toFixed(7); $("f-lon").value = (lo / sw).toFixed(7);
+    const best = Math.min(...samples.map(s => s.accuracy));
+    $("gpsinfo").textContent = `Зразків: ${samples.length}, найкраща точність ±${Math.round(best)} м, ${Math.round((Date.now() - started) / 1000)} с`;
+    if (samples.length >= 20) stopGps();
+  }, e => { $("gpsinfo").textContent = "GPS недоступний: " + e.message; stopGps(); },
+  { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+});
+
+poll();
+</script>
+</body>
+</html>
