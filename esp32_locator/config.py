@@ -37,6 +37,9 @@ DEFAULT_CONFIG = {
     "smoothing": 0.35,
     "fullscreen": False,
     "recordings_dir": "auto",                      # куди --record пише сесії (auto — recordings/ у репо)
+    # передача положення в ArduPilot (--mavlink ПОРТ, лише бойовий режим): швидкість порту, стала висота
+    # над рівнем моря (маяки висоти не міряють), найменша заявлена похибка положення
+    "mavlink": {"baud": 115200, "alt_m": 0.0, "min_accuracy_m": 2.0},
     "transmitters": [],
 }
 FIELD_SPREAD_WARN_M = 1000      # маяки розкидані ширше — імовірно, помилка в координатах
@@ -51,6 +54,7 @@ def load_config(path):
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update(cfg)
     merged["radio"] = {**DEFAULT_CONFIG["radio"], **cfg.get("radio", {})}
+    merged["mavlink"] = {**DEFAULT_CONFIG["mavlink"], **cfg.get("mavlink", {})}
     if "pl_1m" not in merged["signal"]:
         # старий формат (сила 0–1000) — переходимо на модель в децибелах
         merged["signal"] = dict(DEFAULT_CONFIG["signal"])

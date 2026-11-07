@@ -29,11 +29,13 @@ def mix(c1, c2, t):
     return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
 
 
-def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
+def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=None, link=None):
     """readings і reader (потік із полем status) створює і запускає викликач.
     cfg_path=None — режим перегляду: маяки не можна реєструвати з екрана (запис, відтворення).
     truth — справжнє положення приймача (x, y): малюється на мапі разом із похибкою.
-    banner — рядок угорі мапи (наприклад, «● Запис»)."""
+    banner — рядок угорі мапи (наприклад, «● Запис»).
+    on_update(loc) — викликається після кожного перерахунку положення (передача в ArduPilot);
+    link — об’єкт з полем status (з’єднання з ArduPilot), показується внизу панелі."""
     import pygame
 
     loc = Locator(cfg, readings)
@@ -163,6 +165,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         if now - last_calc >= 0.2:
             last_calc = now
             loc.update()
+            if on_update:
+                on_update(loc)
             if loc.pos:
                 trail.append(loc.pos)
         if now - rate_t >= 1.0:
@@ -319,7 +323,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         if loc.unknown:
             y += 4
             text(screen, f"Незареєстровані ({len(loc.unknown)}):", f_small, WARN, (x, y)); y += 20
-            limit = max(1, (panel.bottom - 100 - y) // 36)
+            limit = max(1, (panel.bottom - (118 if link else 100) - y) // 36)
             for mac, r, d in loc.unknown[:limit]:
                 row = pygame.Rect(panel.x + 10, y - 3, panel.w - 20, 34)
                 if mac == selected:
@@ -337,6 +341,9 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None):
         text(screen, "L — журнал пакетів   Q — вихід", f_small, MUTED, (x, by), "bottomleft")
         text(screen, "F — повний екран   C — очистити слід", f_small, MUTED, (x, by - 18), "bottomleft")
         text(screen, f"{reader.status}   {rate:.0f} пак./с", f_small, MUTED, (x, by - 38), "bottomleft")
+        if link:
+            ok = "зв’язок є" in link.status
+            text(screen, link.status, f_small, TX if ok else WARN, (x, by - 56), "bottomleft")
 
         pygame.display.flip()
         clock.tick(30)

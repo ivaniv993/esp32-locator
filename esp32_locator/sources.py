@@ -9,11 +9,13 @@ from .protocol import parse_line
 
 class SerialReader(threading.Thread):
     """Читає приймач у фоні, сам знаходить порт і перепідключається."""
-    def __init__(self, port, baud, readings, default_txp=14, on_line=None):
+    def __init__(self, port, baud, readings, default_txp=14, on_line=None, exclude=()):
         super().__init__(daemon=True)
         self.port, self.baud, self.readings = port, baud, readings
         self.default_txp = default_txp
         self.on_line = on_line        # викликається з сирим рядком кожного розпізнаного виміру (для запису)
+        # порти, які автопошук не чіпає (наприклад, польотний контролер): інакше він читав би їхні байти
+        self.exclude = {os.path.realpath(p) for p in exclude}
         self.status = "Пошук приймача…"
 
     def candidates(self):
@@ -25,7 +27,7 @@ class SerialReader(threading.Thread):
         ports = sorted(glob.glob("/dev/ttyUSB*")) + sorted(glob.glob("/dev/ttyACM*"))
         if os.path.exists("/dev/serial0"):
             ports.append("/dev/serial0")
-        return ports
+        return [p for p in ports if os.path.realpath(p) not in self.exclude]
 
     def run(self):
         try:

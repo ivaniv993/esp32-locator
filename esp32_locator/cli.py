@@ -10,11 +10,12 @@ from .evaluate import (collect_paths, compare, evaluate_files, format_report, lo
                        save_baseline)
 from .geo import format_latlon, frame_from_config, parse_latlon
 from .gui import run_gui
+from .mavlink import MavlinkSender, make_publisher, pymavlink_available
 from .protocol import norm_mac
 from .readings import Readings
 from .session import (SessionWriter, default_recordings_dir, describe, load_session, make_header,
                       new_session_path, radio_label, session_config)
-from .solver import distance_from_loss
+from .solver import Locator, distance_from_loss
 from .sources import ReplaySource, SerialReader
 
 KEEP_RECENT = 200      # скільки останніх пакетів пам’ятати для журналу на екрані
@@ -58,6 +59,45 @@ def parse_truth(cfg, raw):
     return frame_from_config(cfg["geo"]).to_local(lat, lon)
 
 
+def start_mavlink(cfg, args):
+    """Для --mavlink: запускає MavlinkSender і повертає (sender, функція публікації); без --mavlink — (None, None).
+    Положення в ArduPilot передається як широта й довгота, тож потрібен бойовий режим."""
+    if not args.mavlink:
+        return None, None
+    frame = frame_from_config(cfg.get("geo"))
+    if frame is None:
+        sys.exit('--mavlink працює лише в бойовому режимі: потрібні широта й довгота маяків '
+                 '("mode": "field" у config.json і маяки через --add-geo).')
+    if not pymavlink_available():
+        sys.exit("Не встановлено pymavlink: pip3 install --user --break-system-packages pymavlink  (див. README)")
+    baud = args.mavlink_baud or cfg["mavlink"]["baud"]
+    sender = MavlinkSender(args.mavlink, baud)
+    sender.start()
+    print(f"Передача в ArduPilot: {args.mavlink}, {baud} бод (GPS_INPUT; на контролері GPS1_TYPE = 14)")
+    return sender, make_publisher(frame, sender, cfg["mavlink"])
+
+
+def run_headless(cfg, readings, source, on_update=None, link=None, extra=None, every=5.0):
+    """Без екрана: положення рахується кожні 0,2 с, як на екрані; стан друкується раз на every секунд."""
+    loc = Locator(cfg, readings)
+    frame = frame_from_config(cfg.get("geo"))
+    last = 0.0
+    while True:
+        time.sleep(0.2)
+        loc.update()
+        if on_update:
+            on_update(loc)
+        now = time.monotonic()
+        if now - last < every:
+            continue
+        last = now
+        if loc.pos and loc.heard >= 3:
+            where = format_latlon(*frame.to_latlon(*loc.pos)) if frame else f"x={loc.pos[0]:.2f} y={loc.pos[1]:.2f} м"
+        else:
+            where = f"положення невідоме (чути маяків: {loc.heard})"
+        print("  ".join([f"[{source.status}]", where] + ([link.status] if link else []) + ([extra()] if extra else [])))
+
+
 def record(cfg, args):
     """Записує сесію: пакети від приймача + справжні положення маяків і приймача (він стоїть на місці)."""
     field = cfg["mode"] == "field"
@@ -82,6 +122,7 @@ def record(cfg, args):
         cfg["radio"]["sf"] = args.sf
     if args.bw is not None:
         cfg["radio"]["bw_khz"] = args.bw
+    link, publish = start_mavlink(cfg, args)       # до створення файлу: помилка тут не лишає порожній запис
 
     directory = args.out or default_recordings_dir(cfg)
     path = new_session_path(directory)
@@ -89,7 +130,7 @@ def record(cfg, args):
     writer = SessionWriter(path, header)
     readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
     reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
-                          on_line=writer.write_rx)
+                          on_line=writer.write_rx, exclude=[args.mavlink] if args.mavlink else ())
     reader.start()
     radio = radio_label(cfg["radio"])
     src = "--sf" if args.sf is not None else "radio у config.json"
@@ -102,12 +143,11 @@ def record(cfg, args):
     print("Ctrl+C або Q — зупинити.")
     try:
         if args.headless:
-            while True:
-                time.sleep(5)
-                print(f"[{reader.status}]  пакетів: {writer.count}  ({writer.duration:.0f} с)")
+            run_headless(cfg, readings, reader, publish, link,
+                         extra=lambda: f"пакетів: {writer.count}  ({writer.duration:.0f} с)")
         else:
             run_gui(cfg, None, readings, reader, truth=truth,
-                    banner=f"● Запис: {os.path.basename(path)}  ·  {radio}")
+                    banner=f"● Запис: {os.path.basename(path)}  ·  {radio}", on_update=publish, link=link)
     except KeyboardInterrupt:
         pass
     finally:
@@ -155,12 +195,19 @@ def replay(cfg, args):
         print(f"Увага: прив’язку geo у записі пошкоджено ({e}) — показую без широти й довготи.")
         rcfg["geo"] = None
     readings = Readings(rcfg["window_sec"], keep_recent=KEEP_RECENT)
+    link, publish = start_mavlink(rcfg, args)       # запис можна «прогнати» через контролер на стенді
     source = ReplaySource(session, readings, rcfg["default_tx_power_dbm"], loop=args.loop)
     source.start()
     note = session.header.get("note")
     banner = (f"▶ {os.path.basename(args.replay)}" + (f"  ·  {radio_label(session.radio)}" if session.radio else "")
               + (f" — {note}" if note else ""))
-    run_gui(rcfg, None, readings, source, truth=session.truth, banner=banner)
+    try:
+        if args.headless:
+            run_headless(rcfg, readings, source, publish, link)
+        else:
+            run_gui(rcfg, None, readings, source, truth=session.truth, banner=banner, on_update=publish, link=link)
+    except KeyboardInterrupt:
+        pass
 
 
 def info(cfg, args):
@@ -243,7 +290,12 @@ def main():
     ap.add_argument("--bw", type=float, metavar="кГц", help="--record: ширина каналу LoRa (інакше radio.bw_khz)")
     g.add_argument("--info", nargs="+", metavar="FILE", help="опис записів: SF, відстані, пакети від маяків")
     ap.add_argument("--out", metavar="DIR", help="папка для записів (за замовчуванням recordings_dir)")
-    ap.add_argument("--headless", action="store_true", help="--record без екрана (наприклад, по ssh)")
+    ap.add_argument("--headless", action="store_true",
+                    help="без екрана (на борту, по ssh): звичайний режим, --record або --replay")
+    ap.add_argument("--mavlink", metavar="ПОРТ",
+                    help="передавати положення в ArduPilot як GPS (GPS_INPUT), наприклад /dev/serial/by-id/…; "
+                         "лише бойовий режим")
+    ap.add_argument("--mavlink-baud", type=int, metavar="БОД", help="швидкість порту контролера (інакше mavlink.baud)")
     ap.add_argument("--loop", action="store_true", help="--replay по колу")
     ap.add_argument("--name", help="назва маяка для --add / --add-geo")
     g.add_argument("--ports", action="store_true", help="показати послідовні порти цієї плати")
@@ -257,6 +309,13 @@ def main():
     if args.port:
         cfg["serial_port"] = args.port
     field = cfg["mode"] == "field"
+    if args.mavlink:
+        if args.add or args.add_geo or args.remove or args.list or args.ports or args.calibrate or args.info or args.evaluate:
+            sys.exit("--mavlink працює з екраном мапи, --record або --replay")
+        if cfg["serial_port"] != "auto" and os.path.realpath(cfg["serial_port"]) == os.path.realpath(args.mavlink) \
+                and not args.replay:
+            sys.exit(f"Приймач і контролер вказано на одному порту ({args.mavlink}). У варіанті з USB-UART адаптером "
+                     f'приймач зазвичай на "/dev/serial0", а контролер — на адаптері (/dev/serial/by-id/…).')
 
     if args.add or args.add_geo:
         mac = norm_mac((args.add or args.add_geo)[0])
@@ -313,6 +372,14 @@ def main():
         evaluate(cfg, args)
     else:
         readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
-        reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"])
+        reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
+                              exclude=[args.mavlink] if args.mavlink else ())
         reader.start()
-        run_gui(cfg, args.config, readings, reader)
+        link, publish = start_mavlink(cfg, args)
+        try:
+            if args.headless:
+                run_headless(cfg, readings, reader, publish, link)
+            else:
+                run_gui(cfg, args.config, readings, reader, on_update=publish, link=link)
+        except KeyboardInterrupt:
+            pass
