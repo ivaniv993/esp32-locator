@@ -4,14 +4,17 @@
 #   ./install-raspberry.sh              — встановити або оновити
 #   ./install-raspberry.sh --uart       — ще й увімкнути UART (/dev/serial0) для приймача на GPIO
 #   ./install-raspberry.sh --no-autostart — без автозапуску разом із робочим столом
+#   ./install-raspberry.sh --service    — без екрана: служба з веб-сторінкою стартує при ввімкненні
+#   ./install-raspberry.sh --service --https — те саме через HTTPS (кнопка «Маяк тут» з GPS телефона)
 #   ./install-raspberry.sh --uninstall  — видалити програму (налаштування залишаться)
 #
 # Куди встановлюється:
 #   /opt/esp32-locator/locator.py           — точка входу
-#   /opt/esp32-locator/esp32_locator/       — модулі програми
+#   /opt/esp32-locator/esp32_locator/       — модулі програми й веб-сторінка (static/)
 #   /usr/local/bin/esp32-locator            — команда для запуску
 #   ~/.config/esp32-locator/config.json     — ваші налаштування і маяки (не перезаписуються)
-#   ~/.config/autostart/esp32-locator.desktop — автозапуск
+#   ~/.config/autostart/esp32-locator.desktop — автозапуск з екраном
+#   /etc/systemd/system/esp32-locator.service — служба без екрана (--service)
 #
 # Оновлення: git pull у папці репозиторію і знову ./install-raspberry.sh
 set -e
@@ -31,22 +34,37 @@ fi
 TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 CONF_DIR="$TARGET_HOME/.config/esp32-locator"
 AUTOSTART="$TARGET_HOME/.config/autostart/esp32-locator.desktop"
+SERVICE="/etc/systemd/system/esp32-locator.service"
 
-UART=0; AUTO=1; UNINSTALL=0
+UART=0; AUTO=1; UNINSTALL=0; SVC=0; HTTPS=0
 for arg in "$@"; do
   case "$arg" in
     --uart) UART=1 ;;
     --no-autostart) AUTO=0 ;;
+    --service) SVC=1 ;;
+    --https) HTTPS=1 ;;
     --uninstall) UNINSTALL=1 ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
     *) echo "Невідомий параметр: $arg (див. --help)"; exit 1 ;;
   esac
 done
+if [ "$HTTPS" -eq 1 ] && [ "$SVC" -eq 0 ]; then
+  echo "--https працює разом із --service."; exit 1
+fi
 
 say() { printf '\n\033[1m%s\033[0m\n' "$*"; }
 
+remove_service() {
+  if [ -f "$SERVICE" ]; then
+    $SUDO systemctl disable --now esp32-locator.service 2>/dev/null || true
+    $SUDO rm -f "$SERVICE"
+    $SUDO systemctl daemon-reload
+  fi
+}
+
 if [ "$UNINSTALL" -eq 1 ]; then
   say "Видалення esp32-locator"
+  remove_service
   $SUDO rm -rf "$APP_DIR" "$BIN"
   rm -f "$AUTOSTART"
   echo "Програму видалено. Налаштування залишились у $CONF_DIR"
@@ -68,10 +86,11 @@ if [ -z "$ESP32_LOCATOR_SKIP_APT" ]; then
 fi
 
 say "2/5  Копіювання програми в $APP_DIR"
-$SUDO install -d -m 755 "$APP_DIR" "$APP_DIR/esp32_locator"
+$SUDO install -d -m 755 "$APP_DIR" "$APP_DIR/esp32_locator" "$APP_DIR/esp32_locator/static"
 $SUDO install -m 755 "$SRC_DIR/locator.py" "$APP_DIR/locator.py"
-$SUDO rm -f "$APP_DIR"/esp32_locator/*.py          # прибираємо модулі, яких уже немає в репо
+$SUDO rm -f "$APP_DIR"/esp32_locator/*.py "$APP_DIR"/esp32_locator/static/*   # прибираємо те, чого вже немає в репо
 $SUDO install -m 644 "$SRC_DIR"/esp32_locator/*.py "$APP_DIR/esp32_locator/"
+$SUDO install -m 644 "$SRC_DIR"/esp32_locator/static/* "$APP_DIR/esp32_locator/static/"
 $SUDO tee "$BIN" >/dev/null <<'LAUNCHER'
 #!/bin/sh
 export ESP32_LOCATOR_CONFIG="$HOME/.config/esp32-locator/config.json"
@@ -109,6 +128,33 @@ fi
 
 say "5/5  Автозапуск"
 rm -f "$TARGET_HOME/.config/autostart/locator.desktop"   # старий файл із ручного встановлення
+if [ "$SVC" -eq 1 ]; then
+  # служба і програма з робочого столу одночасно змагалися б за порт приймача — лишаємо одне
+  AUTO=0
+  WEB_ARGS="--web"
+  [ "$HTTPS" -eq 1 ] && WEB_ARGS="--web-https"
+  $SUDO tee "$SERVICE" >/dev/null <<UNIT
+[Unit]
+Description=ESP32 LoRa locator (без екрана, веб-сторінка)
+After=network.target
+
+[Service]
+User=$TARGET_USER
+Environment=ESP32_LOCATOR_CONFIG=$CONF_DIR/config.json
+ExecStart=/usr/bin/python3 -u $APP_DIR/locator.py --headless $WEB_ARGS
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable esp32-locator.service
+  $SUDO systemctl restart esp32-locator.service
+  echo "Служба esp32-locator запускається при ввімкненні ($WEB_ARGS). Журнал: journalctl -u esp32-locator -f"
+else
+  remove_service
+fi
 if [ "$AUTO" -eq 1 ]; then
   mkdir -p "$(dirname "$AUTOSTART")"
   cat > "$AUTOSTART" <<DESKTOP
@@ -121,7 +167,7 @@ DESKTOP
   echo "Програма запускатиметься разом із робочим столом."
 else
   rm -f "$AUTOSTART"
-  echo "Автозапуск вимкнено."
+  [ "$SVC" -eq 1 ] || echo "Автозапуск вимкнено."
 fi
 
 # файли в домашній папці мають належати користувачу, навіть якщо скрипт запущено через sudo

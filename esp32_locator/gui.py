@@ -39,11 +39,13 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
     import pygame
 
     loc = Locator(cfg, readings)
-    geo_frame = frame_from_config(cfg.get("geo"))   # бойовий режим (широта/довгота) або None — тестовий
+    geo_src = cfg.get("geo")
+    geo_frame = frame_from_config(geo_src)   # бойовий режим (широта/довгота) або None — тестовий
     feed = PacketFeed(readings)      # журнал пакетів; порожній, якщо Readings створено без keep_recent
     show_log = True
-    # маяки мишею редагуються лише в тестовому режимі: у бойовому їх задають широтою й довготою (--add-geo)
-    editable = cfg_path is not None and geo_frame is None
+    # маяки мишею редагуються лише в тестовому режимі: у бойовому їх задають широтою й довготою
+    # (--add-geo або веб-сторінка); перевіряємо режим, а не сітку — без маяків її ще немає
+    editable = cfg_path is not None and cfg.get("mode", "local") != "field"
 
     pygame.display.init()   # без звуку: аудіо не потрібне
     pygame.font.init()
@@ -90,6 +92,10 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
                              (c[0] + r * math.cos(a2), c[1] + r * math.sin(a2)), 1)
 
     while True:
+        if cfg.get("geo") is not geo_src:     # маяки бойового режиму змінили з веб-сторінки — сітка зсунулась
+            geo_src = cfg.get("geo")
+            geo_frame = frame_from_config(geo_src)
+            trail.clear()
         for e in pygame.event.get():
             if e.type == pygame.QUIT:
                 return
@@ -335,7 +341,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
                 unknown_rects.append((mac, row))
             if editable and not selected:
                 text(screen, "Торкніться ID, щоб розмістити на мапі", f_small, MUTED, (x, y + 2))
-            elif geo_frame and cfg_path is not None:
+            elif cfg.get("mode") == "field" and cfg_path is not None:
                 text(screen, "Додайте: --add-geo ID ШИРОТА ДОВГОТА", f_small, MUTED, (x, y + 2))
         by = panel.bottom - 16
         text(screen, "L — журнал пакетів   Q — вихід", f_small, MUTED, (x, by), "bottomleft")

@@ -40,6 +40,8 @@ DEFAULT_CONFIG = {
     # передача положення в ArduPilot (--mavlink ПОРТ, лише бойовий режим): швидкість порту, стала висота
     # над рівнем моря (маяки висоти не міряють), найменша заявлена похибка положення
     "mavlink": {"baud": 115200, "alt_m": 0.0, "min_accuracy_m": 2.0},
+    # веб-сторінка (--web): порт і PIN для зміни маяків (порожній — змінювати може кожен, хто відкрив сторінку)
+    "web": {"port": 8080, "pin": ""},
     "transmitters": [],
 }
 FIELD_SPREAD_WARN_M = 1000      # маяки розкидані ширше — імовірно, помилка в координатах
@@ -55,6 +57,7 @@ def load_config(path):
     merged.update(cfg)
     merged["radio"] = {**DEFAULT_CONFIG["radio"], **cfg.get("radio", {})}
     merged["mavlink"] = {**DEFAULT_CONFIG["mavlink"], **cfg.get("mavlink", {})}
+    merged["web"] = {**DEFAULT_CONFIG["web"], **cfg.get("web", {})}
     if "pl_1m" not in merged["signal"]:
         # старий формат (сила 0–1000) — переходимо на модель в децибелах
         merged["signal"] = dict(DEFAULT_CONFIG["signal"])

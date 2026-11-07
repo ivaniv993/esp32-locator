@@ -2,6 +2,7 @@
 import argparse
 import glob
 import os
+import subprocess
 import sys
 import time
 
@@ -11,6 +12,7 @@ from .evaluate import (collect_paths, compare, evaluate_files, format_report, lo
 from .geo import format_latlon, frame_from_config, parse_latlon
 from .gui import run_gui
 from .mavlink import MavlinkSender, make_publisher, pymavlink_available
+from .web import WebState, addresses, ensure_certificate, start_server
 from .protocol import norm_mac
 from .readings import Readings
 from .session import (SessionWriter, default_recordings_dir, describe, load_session, make_header,
@@ -77,6 +79,42 @@ def start_mavlink(cfg, args):
     return sender, make_publisher(frame, sender, cfg["mavlink"])
 
 
+def combine(*callbacks):
+    """Одна функція on_update(loc) з кількох (передача в ArduPilot, веб-сторінка); None — якщо жодної."""
+    callbacks = [c for c in callbacks if c]
+    if not callbacks:
+        return None
+
+    def call(loc):
+        for c in callbacks:
+            c(loc)
+    return call
+
+
+def start_web(cfg, args, readings, source, link=None, cfg_path=None, truth=None):
+    """Для --web: запускає веб-сервер і повертає його on_update(loc); без --web — None.
+    cfg_path=None — сторінка лише показує (запис, відтворення); інакше на ній можна змінювати маяки."""
+    if args.web is None:
+        return None
+    port = args.web or cfg["web"]["port"]
+    tls = None
+    if args.web_https:
+        try:
+            tls = ensure_certificate(os.path.dirname(os.path.abspath(args.config)))
+        except (OSError, subprocess.CalledProcessError) as e:
+            sys.exit(f"Не вдалося створити сертифікат для HTTPS (потрібен openssl): {e}")
+    state = WebState(cfg, cfg_path, readings, source, link, truth, pin=cfg["web"]["pin"])
+    try:
+        start_server(state, port, tls=tls)
+    except OSError as e:
+        sys.exit(f"Веб-сервер не запустився на порту {port}: {e}")
+    scheme = "https" if tls else "http"
+    print("Веб-сторінка: " + "  або  ".join(f"{scheme}://{a}:{port}" for a in addresses()))
+    if cfg_path is not None and not state.pin:
+        print("Увага: web.pin у config.json не задано — маяки може змінити кожен, хто відкрив сторінку.")
+    return state.on_update
+
+
 def run_headless(cfg, readings, source, on_update=None, link=None, extra=None, every=5.0):
     """Без екрана: положення рахується кожні 0,2 с, як на екрані; стан друкується раз на every секунд."""
     loc = Locator(cfg, readings)
@@ -122,16 +160,20 @@ def record(cfg, args):
         cfg["radio"]["sf"] = args.sf
     if args.bw is not None:
         cfg["radio"]["bw_khz"] = args.bw
-    link, publish = start_mavlink(cfg, args)       # до створення файлу: помилка тут не лишає порожній запис
+    # усе, що може завершити програму з помилкою (MAVLink, порт веб-сервера), — до створення файлу запису,
+    # інакше лишився б порожній запис
+    link, publish = start_mavlink(cfg, args)
+    readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
+    reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
+                          on_line=lambda line: writer.write_rx(line), exclude=[args.mavlink] if args.mavlink else ())
+    web_update = start_web(cfg, args, readings, reader, link, truth=truth)
 
     directory = args.out or default_recordings_dir(cfg)
     path = new_session_path(directory)
     header = make_header(cfg, truth, args.note or "")
     writer = SessionWriter(path, header)
-    readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
-    reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
-                          on_line=writer.write_rx, exclude=[args.mavlink] if args.mavlink else ())
-    reader.start()
+    reader.start()                                  # після writer: on_line пише в нього
+    on_update = combine(publish, web_update)
     radio = radio_label(cfg["radio"])
     src = "--sf" if args.sf is not None else "radio у config.json"
     rt = header["receiver_truth"]
@@ -143,11 +185,11 @@ def record(cfg, args):
     print("Ctrl+C або Q — зупинити.")
     try:
         if args.headless:
-            run_headless(cfg, readings, reader, publish, link,
+            run_headless(cfg, readings, reader, on_update, link,
                          extra=lambda: f"пакетів: {writer.count}  ({writer.duration:.0f} с)")
         else:
             run_gui(cfg, None, readings, reader, truth=truth,
-                    banner=f"● Запис: {os.path.basename(path)}  ·  {radio}", on_update=publish, link=link)
+                    banner=f"● Запис: {os.path.basename(path)}  ·  {radio}", on_update=on_update, link=link)
     except KeyboardInterrupt:
         pass
     finally:
@@ -197,6 +239,7 @@ def replay(cfg, args):
     readings = Readings(rcfg["window_sec"], keep_recent=KEEP_RECENT)
     link, publish = start_mavlink(rcfg, args)       # запис можна «прогнати» через контролер на стенді
     source = ReplaySource(session, readings, rcfg["default_tx_power_dbm"], loop=args.loop)
+    publish = combine(publish, start_web(rcfg, args, readings, source, link, truth=session.truth))
     source.start()
     note = session.header.get("note")
     banner = (f"▶ {os.path.basename(args.replay)}" + (f"  ·  {radio_label(session.radio)}" if session.radio else "")
@@ -296,6 +339,10 @@ def main():
                     help="передавати положення в ArduPilot як GPS (GPS_INPUT), наприклад /dev/serial/by-id/…; "
                          "лише бойовий режим")
     ap.add_argument("--mavlink-baud", type=int, metavar="БОД", help="швидкість порту контролера (інакше mavlink.baud)")
+    ap.add_argument("--web", type=int, nargs="?", const=0, metavar="ПОРТ",
+                    help="веб-сторінка з мапою для телефона (порт за замовчуванням — web.port, 8080)")
+    ap.add_argument("--web-https", action="store_true",
+                    help="--web через HTTPS із власним сертифікатом: потрібно для кнопки «Маяк тут» (GPS телефона)")
     ap.add_argument("--loop", action="store_true", help="--replay по колу")
     ap.add_argument("--name", help="назва маяка для --add / --add-geo")
     g.add_argument("--ports", action="store_true", help="показати послідовні порти цієї плати")
@@ -309,8 +356,14 @@ def main():
     if args.port:
         cfg["serial_port"] = args.port
     field = cfg["mode"] == "field"
+    other_command = args.add or args.add_geo or args.remove or args.list or args.ports or args.calibrate \
+        or args.info or args.evaluate
+    if (args.web is not None or args.web_https) and other_command:
+        sys.exit("--web працює зі звичайним режимом, --record або --replay")
+    if args.web_https and args.web is None:
+        args.web = 0                                 # --web-https сам по собі означає й --web
     if args.mavlink:
-        if args.add or args.add_geo or args.remove or args.list or args.ports or args.calibrate or args.info or args.evaluate:
+        if other_command:
             sys.exit("--mavlink працює з екраном мапи, --record або --replay")
         if cfg["serial_port"] != "auto" and os.path.realpath(cfg["serial_port"]) == os.path.realpath(args.mavlink) \
                 and not args.replay:
@@ -376,6 +429,7 @@ def main():
                               exclude=[args.mavlink] if args.mavlink else ())
         reader.start()
         link, publish = start_mavlink(cfg, args)
+        publish = combine(publish, start_web(cfg, args, readings, reader, link, cfg_path=args.config))
         try:
             if args.headless:
                 run_headless(cfg, readings, reader, publish, link)
