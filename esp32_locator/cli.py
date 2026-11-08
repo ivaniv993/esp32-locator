@@ -304,8 +304,10 @@ def calibrate(cfg):
     reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"])
     reader.start()
     names = {t["mac"]: t.get("name", "") for t in cfg["transmitters"]}
+    offsets = {t["mac"]: t.get("pl_offset", 0.0) for t in cfg["transmitters"]}
     print("Поставте приймач на 1 м від маяка і запишіть «втрати» як pl_1m,")
-    print("потім на 10 м — як pl_10m (у config.json, розділ signal). Ctrl+C — вихід.\n")
+    print("потім на 10 м — як pl_10m (у config.json, розділ signal). Ctrl+C — вихід.")
+    print("Зручніше — на веб-сторінці (--web), розділ «Калібрування»: там модель рахується сама.\n")
     try:
         while True:
             time.sleep(1)
@@ -315,7 +317,7 @@ def calibrate(cfg):
                 snr = f"{r['snr']:5.1f}" if r["snr"] is not None else "  —  "
                 print(f"  {names.get(mac, '?'):>3}  {mac}  RSSI {r['rssi']:6.1f} дБм  SNR {snr}  "
                       f"потужність {r['txp']:.0f} дБм  втрати {r['pl']:5.1f} дБ  "
-                      f"-> {distance_from_loss(r['pl'], cfg):5.1f} м  (пакетів: {r['n']})")
+                      f"-> {distance_from_loss(r['pl'], cfg, offsets.get(mac, 0.0)):5.1f} м  (пакетів: {r['n']})")
             print()
     except KeyboardInterrupt:
         pass

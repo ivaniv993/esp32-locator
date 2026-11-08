@@ -49,7 +49,7 @@
   dialog::backdrop { background: rgba(0,0,0,.55); }
   dialog h3 { margin: 0 0 12px; font-size: 17px; }
   label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
-  input { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--major); border-radius: 8px;
+  input, select { width: 100%; font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--major); border-radius: 8px;
     padding: 10px 12px; min-height: 44px; }
   input:read-only { color: var(--muted); }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
@@ -92,6 +92,32 @@
       <div id="unknown"></div>
     </div>
     <div class="actions" id="addbox" style="display:none"><button class="ghost grow" id="addbtn">Додати маяк за ID</button></div>
+  </section>
+
+  <section id="calbox" style="display:none">
+    <h2>Калібрування</h2>
+    <div id="calmodel" class="small"></div>
+    <div class="two">
+      <div><label for="cal-mac">Маяк</label><select id="cal-mac"></select></div>
+      <div><label for="cal-d">Відстань до нього, м</label><input id="cal-d" inputmode="decimal" value="1" autocomplete="off"></div>
+    </div>
+    <div id="callive" class="small muted" style="margin-top:6px"></div>
+    <div class="actions">
+      <button class="ghost" id="cal-gps" style="display:none">📍 За GPS</button>
+      <button class="primary grow" id="cal-go">Виміряти 10 с</button>
+    </div>
+    <div id="caljob" class="small" style="margin-top:8px"></div>
+    <div id="calmsg" class="small" style="margin-top:6px"></div>
+    <div id="calsamples" style="margin-top:8px"></div>
+    <details style="margin-top:10px"><summary class="small">Як калібрувати</summary>
+      <ol class="small muted" style="padding-left:18px; margin:8px 0 0">
+        <li>Поставте приймач на відомій відстані від маяка — антени на тій самій висоті, що й у роботі, між ними нічого.</li>
+        <li>Виберіть маяк, впишіть відстань (рулеткою; на відстанях від ~15 м можна «📍 За GPS»: відстань від телефона до маяка) і натисніть «Виміряти». 10 с не рухайте приймач і не стійте між ним і маяком.</li>
+        <li>Повторіть на іншій відстані, наприклад 1 м і 10 м. Найкраще — кожен маяк на двох відстанях: тоді враховуються й відмінності між маяками.</li>
+      </ol>
+      <div class="small muted" style="margin-top:6px">Після кожного виміру модель перераховується з усіх вимірів і одразу діє — положення рахується вже з нею. Значення зберігаються в config.json. Невдалий вимір видаліть кнопкою ✕.</div>
+    </details>
+    <div class="actions"><button class="danger" id="cal-reset">Скинути калібрування</button></div>
   </section>
 
   <section>
@@ -212,6 +238,7 @@ function render() {
     $("phoneinfo").textContent = t;
   } else $("phoneinfo").textContent = "";
   renderRec();
+  renderCal();
 
   // Рядки й кнопки перебудовуються лише при зміні складу маяків, інакше оновлюються лише цифри:
   // якби кнопка перестворювалась кожні пів секунди, натискання на телефоні губилися б.
@@ -230,8 +257,9 @@ function render() {
     const el = $("beacons").querySelector(`[data-info="${CSS.escape(b.mac)}"]`);
     if (!el) continue;
     el.className = "small " + (b.rssi == null ? "warn" : "muted");
-    el.textContent = b.rssi == null ? "немає сигналу"
-      : `${fmt(b.rssi, 0)} дБм${b.snr == null ? "" : ` · SNR ${fmt(b.snr, 0)}`} · ${fmt(b.distance)} м · пак.: ${b.packets}`;
+    el.textContent = (b.rssi == null ? "немає сигналу"
+      : `${fmt(b.rssi, 0)} дБм${b.snr == null ? "" : ` · SNR ${fmt(b.snr, 0)}`} · ${fmt(b.distance)} м · пак.: ${b.packets}`)
+      + (b.offset ? ` · зсув ${b.offset > 0 ? "+" : ""}${fmt(b.offset)} дБ` : "");
   }
 
   $("unknownbox").style.display = S.unknown.length ? "" : "none";
@@ -451,6 +479,8 @@ $("delbtn").addEventListener("click", async () => {
 $("addbtn").addEventListener("click", () => openEditor("", false));
 document.addEventListener("click", ev => {
   const t = ev.target.closest("button"); if (!t) return;
+  if (t.dataset.caldel != null) calPost("/api/calibration/delete", { index: Number(t.dataset.caldel) }, "Видалити цей вимір?");
+  if (t.dataset.calcancel != null) calPost("/api/calibration/cancel", {});
   if (t.dataset.rec === "start") startRec();
   if (t.dataset.rec === "stop") stopRec();
   if (t.dataset.rec === "claim") { rec.owner = S.recording.id; rec.since = Date.now(); store.set("rec", rec.owner); startTrack(); }
@@ -481,6 +511,88 @@ $("gpsbtn").addEventListener("click", () => {
     $("gpsinfo").textContent = `Зразків: ${samples.length}, найкраща точність ±${Math.round(best)} м, ${Math.round((Date.now() - started) / 1000)} с`;
     if (samples.length >= 20) stopGps();
   }, e => { $("gpsinfo").textContent = "GPS недоступний: " + e.message; stopGps(); },
+  { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+});
+
+// ------------------------------------------------------------ калібрування
+// Вимір іде на Pi (медіана втрат маяка за 10 с); сторінка лише запускає його й показує хід і результат.
+let calGpsBusy = false;
+
+function renderCal() {
+  const K = S.calibration;
+  $("calbox").style.display = K ? "" : "none";
+  if (!K) return;
+  const sig = K.signal, n10 = sig.pl_10m - sig.pl_1m;
+  let model = `Модель: ${fmt(sig.pl_1m)} дБ на 1 м, ${fmt(sig.pl_10m)} дБ на 10 м (n = ${fmt(n10 / 10, 2)})`;
+  model += K.samples.length
+    ? ` · вимірів: ${K.samples.length}, розкид ±${fmt(K.fit && K.fit.rms)} дБ`
+    : ' · <span class="warn">не відкалібровано — значення за замовчуванням, відстані приблизні</span>';
+  if (K.fit) model += K.fit.notes.map(n => `<div class="warn" style="margin-top:4px">${esc(n)}</div>`).join("");
+  $("calmodel").innerHTML = model;
+
+  const sel = $("cal-mac");
+  keyed(sel, JSON.stringify(S.beacons.map(b => [b.mac, b.name])), () =>
+    S.beacons.map(b => `<option value="${esc(b.mac)}">${esc(b.name || b.mac)} — ${esc(b.mac.slice(-6))}</option>`).join(""));
+  if (!sel.value && S.beacons.length) sel.value = S.beacons[0].mac;
+  const b = S.beacons.find(b => b.mac === sel.value);
+  $("callive").textContent = !b ? "Спершу зареєструйте маяки."
+    : b.loss == null ? `Від ${b.name || b.mac} зараз немає пакетів.`
+    : `Зараз від ${b.name || b.mac}: втрати ${fmt(b.loss)} дБ → за моделлю ${fmt(b.distance)} м`;
+  $("cal-gps").style.display = gpsOk() ? "" : "none";
+  $("cal-go").disabled = !!K.job || !b;
+  $("cal-gps").disabled = calGpsBusy || !b;
+
+  keyed($("caljob"), JSON.stringify(!!K.job), () => K.job
+    ? `<div class="row" style="border:0"><div class="grow" id="caljobtext"></div><button class="ghost" data-calcancel>Скасувати</button></div>` : "");
+  if (K.job) {
+    const j = K.job;
+    $("caljobtext").innerHTML = `<b>Вимірюю ${esc(j.name || j.mac)} на ${fmt(j.distance)} м</b> — не рухайте приймач.<br>`
+      + `Залишилось ${Math.ceil(j.left)} с · пакетів ${j.packets}${j.loss == null ? "" : ` · втрати ${fmt(j.loss)} дБ`}`;
+  }
+  const last = K.last && Date.now() / 1000 - K.last.at < 120 ? K.last : null;
+  if (!calGpsBusy) $("calmsg").innerHTML = last ? `<span class="${last.ok ? "ok" : "err"}">${esc(last.ok || last.error)}</span>` : "";
+
+  keyed($("calsamples"), JSON.stringify(K.samples), () => K.samples.length ? K.samples.map((s, i) => `
+    <div class="row">
+      <div class="grow"><b>${esc(s.name)}</b> · ${fmt(s.d)} м · ${fmt(s.loss)} дБ${s.n ? ` · ${s.n} пак.` : ""}
+        <div class="small muted">за новою моделлю: ${fmt(s.model_d)} м</div></div>
+      <button class="ghost" data-caldel="${i}" aria-label="Видалити вимір">✕</button>
+    </div>`).join("") : "");
+}
+
+async function calPost(url, data, ask) {
+  if ((ask && !confirm(ask)) || !ensurePin()) return;
+  try { toast((await post(url, data)).message); }
+  catch (e) { toast(e.message, 6000); }
+}
+
+$("cal-mac").addEventListener("change", () => S && renderCal());
+$("cal-go").addEventListener("click", () =>
+  calPost("/api/calibration/measure", { mac: $("cal-mac").value, distance: num($("cal-d").value) }));
+$("cal-reset").addEventListener("click", () =>
+  calPost("/api/calibration/reset", {}, "Скинути калібрування? Усі виміри буде видалено, модель — за замовчуванням."));
+
+$("cal-gps").addEventListener("click", () => {          // середнє з 10 точок GPS телефона → відстань до маяка
+  const b = S.beacons.find(b => b.mac === $("cal-mac").value);
+  if (!b || !b.latlon || calGpsBusy) return;
+  const s = [];
+  calGpsBusy = true; $("cal-gps").disabled = true;
+  $("calmsg").textContent = "Чекаю GPS… стійте біля приймача.";
+  const done = msg => { navigator.geolocation.clearWatch(id); calGpsBusy = false; $("calmsg").innerHTML = msg; renderCal(); };
+  const id = navigator.geolocation.watchPosition(p => {
+    s.push(p.coords);
+    $("calmsg").textContent = `GPS: ${s.length} з 10, точність ±${Math.round(p.coords.accuracy)} м`;
+    if (s.length < 10) return;
+    let sw = 0, la = 0, lo = 0;
+    for (const c of s) { const w = 1 / Math.max(c.accuracy, 1) ** 2; sw += w; la += w * c.latitude; lo += w * c.longitude; }
+    la /= sw; lo /= sw;
+    const acc = s.map(c => c.accuracy).sort((a, b) => a - b)[Math.floor(s.length / 2)];
+    const dy = (la - b.latlon[0]) * 111320, dx = (lo - b.latlon[1]) * 111320 * Math.cos(la * Math.PI / 180);
+    const d = Math.hypot(dx, dy);
+    $("cal-d").value = d.toFixed(1);
+    done(`<span class="ok">Відстань до ${esc(b.name || b.mac)} за GPS: ${fmt(d)} м (точність GPS ±${Math.round(acc)} м).</span>`
+      + (d < 3 * acc ? `<br><span class="warn">Для такої відстані GPS надто неточний — краще виміряти рулеткою.</span>` : ""));
+  }, e => done(`<span class="err">GPS недоступний: ${esc(e.message)}</span>`),
   { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
 });
 

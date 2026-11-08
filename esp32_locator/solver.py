@@ -2,10 +2,11 @@
 import math
 
 
-def distance_from_loss(pl, cfg):
-    """Модель log-distance: втрати ростуть на (pl_10m − pl_1m) дБ при кожному 10-кратному збільшенні відстані."""
+def distance_from_loss(pl, cfg, offset=0.0):
+    """Модель log-distance: втрати ростуть на (pl_10m − pl_1m) дБ при кожному 10-кратному збільшенні відстані.
+    offset — власний зсув маяка з калібрування (pl_offset), дБ."""
     p1, p10 = cfg["signal"]["pl_1m"], cfg["signal"]["pl_10m"]
-    return 10 ** ((pl - p1) / max(1.0, p10 - p1))
+    return 10 ** ((pl - offset - p1) / max(1.0, p10 - p1))
 
 
 def solve(pts):
@@ -70,13 +71,13 @@ class Locator:
         for t in self.cfg["transmitters"]:
             r = snap.get(t["mac"])
             if r:
-                d = distance_from_loss(r["pl"], self.cfg)
+                d = distance_from_loss(r["pl"], self.cfg, t.get("pl_offset", 0.0))
                 pts.append((t["x"], t["y"], d))
                 rows.append((t, r, d))
             else:
                 rows.append((t, None, None))
         self.rows, self.heard = rows, len(pts)
-        self.unknown = sorted(
+        self.unknown = sorted(                     # незареєстровані — без власного зсуву калібрування
             ((m, r, distance_from_loss(r["pl"], self.cfg)) for m, r in snap.items() if m not in known),
             key=lambda u: -u[1]["rssi"])
         res = solve(pts)

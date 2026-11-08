@@ -130,8 +130,12 @@ def total_metrics(results):
 
 def params(cfg):
     """Параметри алгоритму, від яких залежить результат."""
-    return {"pl_1m": cfg["signal"]["pl_1m"], "pl_10m": cfg["signal"]["pl_10m"],
-            "smoothing": cfg["smoothing"], "window_sec": cfg["window_sec"], "step": STEP}
+    out = {"pl_1m": cfg["signal"]["pl_1m"], "pl_10m": cfg["signal"]["pl_10m"],
+           "smoothing": cfg["smoothing"], "window_sec": cfg["window_sec"], "step": STEP}
+    offsets = {t["mac"]: t["pl_offset"] for t in cfg["transmitters"] if t.get("pl_offset")}
+    if offsets:                                   # власні зсуви маяків з калібрування
+        out["offsets"] = offsets
+    return out
 
 
 def to_baseline(results, cfg):

@@ -30,6 +30,9 @@ DEFAULT_CONFIG = {
     "baud": 115200,
     "area": {"width": 10, "height": 8},
     "signal": {"pl_1m": 40.0, "pl_10m": 67.0},   # втрати сигналу (дБ) на 1 м і на 10 м
+    # виміри калібрування з веб-сторінки: [{"mac", "d" (м), "loss" (дБ), "n" (пакетів)}]; з них рахуються
+    # signal і pl_offset маяків (calibration.py)
+    "calibration": [],
     "default_tx_power_dbm": 14,                    # якщо приймач не передає потужність
     "radio": {"sf": 12, "bw_khz": 125},            # як прошиті маяки й приймач; приймач цього не повідомляє,
                                                    # тому значення лише записується в сесії для опису
@@ -66,6 +69,13 @@ def load_config(path):
         print("config.json оновлено під LoRa-маяки. Відкалібруйте pl_1m і pl_10m (--calibrate).")
     for t in merged["transmitters"]:
         t["mac"] = norm_mac(t["mac"]) or t["mac"]
+        if "pl_offset" in t:
+            try:
+                t["pl_offset"] = float(t["pl_offset"])
+            except (TypeError, ValueError):
+                raise ValueError(f"маяк {t.get('name') or t['mac']}: pl_offset має бути числом (дБ)") from None
+    if not isinstance(merged["calibration"], list):
+        raise ValueError("calibration має бути списком вимірів")
     if merged["mode"] not in MODES:
         raise ValueError(f'mode має бути "local" (тестовий) або "field" (бойовий), а не {merged["mode"]!r}')
     if merged["mode"] == "field":
@@ -121,7 +131,7 @@ def save_config(path, cfg):
     out.pop("geo", None)
     if out.get("mode") == "field":
         out.pop("area", None)
-        out["transmitters"] = [{k: t[k] for k in ("name", "mac", "lat", "lon") if k in t}
+        out["transmitters"] = [{k: t[k] for k in ("name", "mac", "lat", "lon", "pl_offset") if k in t}
                                for t in out["transmitters"]]
     os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

@@ -19,16 +19,19 @@ import math
 import os
 import socket
 import ssl
+import statistics
 import subprocess
 import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .config import apply_field, field_spread_warning, save_config
+from . import calibration
+from .config import DEFAULT_CONFIG, apply_field, field_spread_warning, save_config
 from .geo import check_latlon, frame_from_config
 from .packetlog import PacketFeed, format_row
 from .protocol import norm_mac
+from .solver import distance_from_loss
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 MAX_BODY = 8192
@@ -36,6 +39,7 @@ TRAIL = 120
 LOG_ROWS = 40
 MAX_GPS_POINTS = 60          # точок GPS в одному запиті (телефон надсилає пачками, якщо зв’язок пропадав)
 MAX_GPS_AGE = 600.0          # с: старіші точки (телефон довго був без зв’язку) не пишемо
+DEFAULT_N10 = DEFAULT_CONFIG["signal"]["pl_10m"] - DEFAULT_CONFIG["signal"]["pl_1m"]
 
 
 class EditError(ValueError):
@@ -64,6 +68,9 @@ class WebState:
         self.phone = None                                 # (x, y, acc, monotonic-час точки) — останній GPS
         self.phone_trail = deque(maxlen=TRAIL)
         self._phone_trail_at = 0.0
+        self.cal_job = None                               # вимір калібрування, що йде зараз
+        self.cal_last = None                              # {"ok"|"error": текст, "at": time.time()}
+        self.cal_fit = calibration.fit(cfg.get("calibration") or [], DEFAULT_N10)
         self._json = b"{}"
         self._geo_src = object()
         self._frame = None
@@ -106,6 +113,7 @@ class WebState:
                 loc.pos, self._reset_locator = None, False  # положення в іншій сітці
                 self.trail.clear()
             self.feed.update(self.cfg["transmitters"])
+            self._cal_tick()
             frame = self.frame()
             fix = bool(loc.pos) and loc.heard >= 3
             if fix:
@@ -143,6 +151,7 @@ class WebState:
                 "beacons": [{"name": t.get("name") or "", "mac": t["mac"], "x": t["x"], "y": t["y"],
                              "latlon": [t["lat"], t["lon"]] if "lat" in t else latlon(t["x"], t["y"]),
                              "rssi": round(r["rssi"], 1) if r else None,
+                             "loss": round(r["pl"], 1) if r else None, "offset": t.get("pl_offset", 0.0),
                              "snr": round(r["snr"], 1) if r and r["snr"] is not None else None,
                              "packets": r["n"] if r else 0, "distance": None if d is None else round(d, 2)}
                             for t, r, d in loc.rows],
@@ -154,6 +163,7 @@ class WebState:
                 "phone": phone,
                 "phone_trail": list(self.phone_trail),
                 "recording": self.recorder.status() if self.recorder else None,
+                "calibration": self._cal_state() if self.editable else None,
                 "log": [{"text": format_row(r), "known": r.name is not None} for r in list(self.feed.rows)[-LOG_ROWS:]],
                 "status": self.source.status,
                 "link": self.link.status if self.link else None,
@@ -250,6 +260,129 @@ class WebState:
             return f"Видалено {mac}"
         return self._commit(mutate)
 
+    # ------------------------------------------------------------ калібрування
+    # Приймач стоїть на відомій відстані від маяка; за кілька секунд береться медіана втрат його пакетів.
+    # Після кожного виміру модель перераховується з усіх вимірів (calibration.fit) і одразу діє:
+    # Locator читає cfg["signal"] і pl_offset маяків на кожному кроці. Виміри й результат — у config.json.
+    def _samples(self):
+        return self.cfg.setdefault("calibration", [])
+
+    def _cal_apply(self):
+        """Перерахунок моделі з усіх вимірів і збереження. Викликати під self.lock."""
+        # якщо нахил не виміряно, береться значення за замовчуванням, а не поточне: інакше після
+        # видалення виміру на 10 м лишився б нахил, порахований із нього
+        self.cal_fit = calibration.fit(self._samples(), DEFAULT_N10)
+        if self.cal_fit:
+            calibration.apply(self.cfg, self.cal_fit)
+        save_config(self.cfg_path, self.cfg)
+
+    def _cal_tick(self):
+        """З on_update: збирає пакети маяка, що вимірюється; по завершенні — новий вимір і перерахунок."""
+        job = self.cal_job
+        if not job:
+            return
+        for p in self.readings.packets_after(job["seq"]):
+            job["seq"] = p[0]
+            if p[2] == job["mac"]:
+                job["losses"].append(p[5] - p[3])         # потужність − RSSI
+        if time.monotonic() < job["end"]:
+            return
+        self.cal_job = None
+        name = job["name"] or job["mac"]
+        n = len(job["losses"])
+        if n < calibration.MIN_PACKETS:
+            self.cal_last = {"error": f"{name}: за {job['seconds']:g} с прийнято пакетів: {n}, а потрібно щонайменше "
+                                      f"{calibration.MIN_PACKETS} — вимір не зараховано. Чи увімкнено маяк?",
+                             "at": time.time()}
+            return
+        loss = statistics.median(job["losses"])
+        self._samples().append({"mac": job["mac"], "d": job["distance"], "loss": round(loss, 1), "n": n})
+        try:
+            self._cal_apply()
+        except OSError as e:
+            self.cal_last = {"error": f"Не вдалося зберегти config.json: {e}", "at": time.time()}
+            return
+        sig = self.cfg["signal"]
+        text = (f"{name} на {job['distance']:g} м: втрати {loss:.1f} дБ, пакетів {n}. Модель оновлено: "
+                f"{sig['pl_1m']:.1f} дБ на 1 м, {sig['pl_10m']:.1f} дБ на 10 м.")
+        self.cal_last = {"ok": text.replace(".", ",").rstrip(",") + ".", "at": time.time()}
+
+    def _cal_state(self):
+        names = {t["mac"]: t.get("name") or t["mac"] for t in self.cfg["transmitters"]}
+        offsets = {t["mac"]: t.get("pl_offset", 0.0) for t in self.cfg["transmitters"]}
+        job = None
+        if self.cal_job:
+            j = self.cal_job
+            job = {"mac": j["mac"], "name": j["name"], "distance": j["distance"], "packets": len(j["losses"]),
+                   "left": round(max(0.0, j["end"] - time.monotonic()), 1),
+                   "loss": round(statistics.median(j["losses"]), 1) if j["losses"] else None}
+        samples = [{"mac": s["mac"], "name": names.get(s["mac"], s["mac"]), "d": s["d"], "loss": s["loss"],
+                    "n": s.get("n"), "model_d": round(distance_from_loss(s["loss"], self.cfg, offsets.get(s["mac"], 0.0)), 2)}
+                   for s in self._samples()]
+        return {"signal": dict(self.cfg["signal"]), "samples": samples, "job": job, "last": self.cal_last,
+                "fit": {k: self.cal_fit[k] for k in ("rms", "slope_measured", "notes")} if self.cal_fit else None}
+
+    def calibration_measure(self, data):
+        """Почати вимір: {"mac", "distance" (м), "seconds"?}."""
+        if not self.editable:
+            raise EditError("Калібрування — лише у звичайному режимі (не під час --record чи --replay).")
+        self._auth(data.get("pin"))
+        mac = norm_mac(data.get("mac", ""))
+        t = next((t for t in self.cfg["transmitters"] if t["mac"] == mac), None)
+        if t is None:
+            raise EditError("Спершу зареєструйте маяк — калібрують зареєстровані маяки.")
+        try:
+            d, sec = float(data.get("distance")), float(data.get("seconds") or 10)
+        except (TypeError, ValueError):
+            raise EditError("Відстань має бути числом, у метрах.") from None
+        if not (math.isfinite(d) and calibration.MIN_DISTANCE <= d <= calibration.MAX_DISTANCE):
+            raise EditError(f"Відстань має бути від {calibration.MIN_DISTANCE:g} до {calibration.MAX_DISTANCE:g} м.")
+        sec = min(max(sec if math.isfinite(sec) else 10.0, 5.0), 60.0)
+        with self.lock:
+            if self.cal_job:
+                raise EditError("Вже йде вимір — дочекайтесь його або скасуйте.")
+            self.cal_job = {"mac": mac, "name": t.get("name") or "", "distance": round(d, 2), "seconds": sec,
+                            "end": time.monotonic() + sec, "seq": self.readings.total, "losses": []}
+            self.cal_last = None
+        return {"ok": True, "message": f"Вимірюю {t.get('name') or mac} на {d:g} м, {sec:g} с — не рухайте приймач."}
+
+    def calibration_cancel(self, data):
+        self._auth(data.get("pin"))
+        with self.lock:
+            self.cal_job = None
+        return {"ok": True, "message": "Вимір скасовано."}
+
+    def calibration_delete(self, data):
+        """Видалити вимір {"index"} (номер у списку на сторінці); модель перераховується без нього."""
+        if not self.editable:
+            raise EditError("Калібрування — лише у звичайному режимі.")
+        self._auth(data.get("pin"))
+        with self.lock:
+            samples = self._samples()
+            try:
+                i = int(data.get("index"))
+                if not 0 <= i < len(samples):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise EditError("Такого виміру немає.") from None
+            samples.pop(i)
+            self._cal_apply()
+        return {"ok": True, "message": "Вимір видалено, модель перераховано."}
+
+    def calibration_reset(self, data):
+        """Усі виміри геть, модель — значення за замовчуванням, зсуви маяків — нуль."""
+        if not self.editable:
+            raise EditError("Калібрування — лише у звичайному режимі.")
+        self._auth(data.get("pin"))
+        with self.lock:
+            self.cfg["calibration"] = []
+            self.cfg["signal"] = {**self.cfg["signal"], **DEFAULT_CONFIG["signal"]}
+            for t in self.cfg["transmitters"]:
+                t.pop("pl_offset", None)
+            self.cal_fit, self.cal_job, self.cal_last = None, None, None
+            save_config(self.cfg_path, self.cfg)
+        return {"ok": True, "message": "Калібрування скинуто до значень за замовчуванням."}
+
     # ------------------------------------------------------------ запис і GPS телефона
     def _need_recorder(self, pin):
         if not self.recorder:
@@ -343,7 +476,11 @@ def make_handler(state):
             path = self.path.split("?", 1)[0]
             actions = {"/api/beacons": state.save_beacon, "/api/beacons/delete": state.delete_beacon,
                        "/api/record/start": state.record_start, "/api/record/stop": state.record_stop,
-                       "/api/gps": state.post_gps}
+                       "/api/gps": state.post_gps,
+                       "/api/calibration/measure": state.calibration_measure,
+                       "/api/calibration/cancel": state.calibration_cancel,
+                       "/api/calibration/delete": state.calibration_delete,
+                       "/api/calibration/reset": state.calibration_reset}
             if path not in actions:
                 return self._json(404, {"error": "Не знайдено"})
             try:

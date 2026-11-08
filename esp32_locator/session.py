@@ -81,6 +81,7 @@ def make_header(cfg, truth, note=""):
         "area": dict(cfg["area"]),
         "transmitters": [{"name": t.get("name", ""), "mac": t["mac"], "x": t["x"], "y": t["y"],
                           **({"lat": t["lat"], "lon": t["lon"]} if "lat" in t else {}),
+                          **({"pl_offset": t["pl_offset"]} if "pl_offset" in t else {}),
                           **({"distance": distance_to(truth, t)} if truth else {})}
                          for t in cfg["transmitters"]],
         "receiver_truth": receiver,
@@ -392,10 +393,19 @@ def load_session(path):
 
 def session_config(cfg, session):
     """Копія cfg для відтворення: зона і маяки беруться із запису, а параметри алгоритму
-    (калібрування, згладжування, вікно) — з поточного config.json, щоб їх можна було змінювати."""
+    (калібрування, згладжування, вікно) — з поточного config.json, щоб їх можна було змінювати.
+    Зсув маяка (pl_offset) — теж поточний, якщо маяк є в config.json; інакше — із запису."""
     out = json.loads(json.dumps(cfg))
     out["area"] = dict(session.header["area"])
     out["mode"] = session.header.get("mode", "local")
     out["geo"] = session.header.get("geo")     # координати маяків у записі відносно його прив’язки
-    out["transmitters"] = [dict(t, x=float(t["x"]), y=float(t["y"])) for t in session.header["transmitters"]]
+    current = {t["mac"]: t.get("pl_offset") for t in cfg["transmitters"]}
+    out["transmitters"] = []
+    for t in session.header["transmitters"]:
+        t = dict(t, x=float(t["x"]), y=float(t["y"]))
+        if t["mac"] in current:
+            t.pop("pl_offset", None)
+            if current[t["mac"]]:
+                t["pl_offset"] = current[t["mac"]]
+        out["transmitters"].append(t)
     return out
