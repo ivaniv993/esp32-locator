@@ -19,8 +19,10 @@ import math
 import os
 import socket
 import ssl
+import shutil
 import statistics
 import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -44,6 +46,30 @@ DEFAULT_N10 = DEFAULT_CONFIG["signal"]["pl_10m"] - DEFAULT_CONFIG["signal"]["pl_
 
 class EditError(ValueError):
     """Помилка зміни маяків, зрозуміла людині (повертається на сторінку)."""
+
+
+def poweroff_command():
+    """Команда вимкнення Pi: від root — напряму, інакше через sudo без пароля (дозвіл на саме цю
+    команду додає install-raspberry.sh --service у /etc/sudoers.d/esp32-locator). None — не Linux."""
+    systemctl = shutil.which("systemctl")
+    if not systemctl or not sys.platform.startswith("linux"):
+        return None
+    return [systemctl, "poweroff"] if os.geteuid() == 0 else ["sudo", "-n", systemctl, "poweroff"]
+
+
+def system_poweroff(check=False):
+    """check=True — лише перевірити, що вимкнути можна (sudo -l), нічого не вимикаючи. Повертає True/False."""
+    cmd = poweroff_command()
+    if cmd is None:
+        return False
+    if check:
+        if cmd[0] != "sudo":
+            return True
+        cmd = ["sudo", "-n", "-l", *cmd[2:]]
+    try:
+        return subprocess.run(cmd, capture_output=True, timeout=10).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def next_name(transmitters):
@@ -71,6 +97,7 @@ class WebState:
         self.cal_job = None                               # вимір калібрування, що йде зараз
         self.cal_last = None                              # {"ok"|"error": текст, "at": time.time()}
         self.cal_fit = calibration.fit(cfg.get("calibration") or [], DEFAULT_N10)
+        self.poweroff = system_poweroff                   # у тестах підміняється
         self._json = b"{}"
         self._geo_src = object()
         self._frame = None
@@ -147,6 +174,7 @@ class WebState:
                 "mode": self.cfg.get("mode", "local"),
                 "area": self.cfg["area"],
                 "editable": self.editable and not self.recording,
+                "can_shutdown": self.editable,            # звичайний режим (служба), не запис і не відтворення
                 "pin_required": bool(self.pin),
                 "beacons": [{"name": t.get("name") or "", "mac": t["mac"], "x": t["x"], "y": t["y"],
                              "latlon": [t["lat"], t["lon"]] if "lat" in t else latlon(t["x"], t["y"]),
@@ -383,6 +411,28 @@ class WebState:
             save_config(self.cfg_path, self.cfg)
         return {"ok": True, "message": "Калібрування скинуто до значень за замовчуванням."}
 
+    # ------------------------------------------------------------ вимкнення Pi
+    def shutdown(self, data):
+        """Вимкнути Raspberry Pi з телефона: запис закривається, через 2 с — systemctl poweroff
+        (відповідь сторінці встигає піти до того, як служба отримає SIGTERM)."""
+        if not self.editable:
+            raise EditError("Вимкнення — лише у звичайному режимі (служба на Pi).")
+        self._auth(data.get("pin"))
+        if not self.poweroff(check=True):
+            raise EditError("Немає дозволу вимкнути Pi. Перевстановіть службу: ./install-raspberry.sh --service "
+                            "--https (вона додає дозвіл на вимкнення).")
+        saved = None
+        if self.recording:
+            res = self.recorder.stop()
+            saved = res and res["path"] and os.path.basename(res["path"])
+
+        def later():
+            time.sleep(2)
+            self.poweroff()
+        threading.Thread(target=later, daemon=True).start()
+        return {"ok": True, "message": ("Запис збережено: " + saved + ". " if saved else "")
+                + "Pi вимикається. Від’єднуйте живлення, коли зелений світлодіод на Pi перестане блимати (~20–30 с)."}
+
     # ------------------------------------------------------------ запис і GPS телефона
     def _need_recorder(self, pin):
         if not self.recorder:
@@ -480,7 +530,8 @@ def make_handler(state):
                        "/api/calibration/measure": state.calibration_measure,
                        "/api/calibration/cancel": state.calibration_cancel,
                        "/api/calibration/delete": state.calibration_delete,
-                       "/api/calibration/reset": state.calibration_reset}
+                       "/api/calibration/reset": state.calibration_reset,
+                       "/api/shutdown": state.shutdown}
             if path not in actions:
                 return self._json(404, {"error": "Не знайдено"})
             try:

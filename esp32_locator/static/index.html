@@ -125,6 +125,7 @@
     <div id="status" class="small muted"></div>
     <div id="link" class="small"></div>
     <details><summary class="small">Журнал пакетів</summary><div id="log"></div></details>
+    <div class="actions" id="offbox" style="display:none"><button class="danger" id="offbtn">⏻ Вимкнути Pi</button></div>
   </section>
 </main>
 
@@ -239,6 +240,7 @@ function render() {
   } else $("phoneinfo").textContent = "";
   renderRec();
   renderCal();
+  $("offbox").style.display = S.can_shutdown ? "" : "none";
 
   // Рядки й кнопки перебудовуються лише при зміні складу маяків, інакше оновлюються лише цифри:
   // якби кнопка перестворювалась кожні пів секунди, натискання на телефоні губилися б.
@@ -512,6 +514,20 @@ $("gpsbtn").addEventListener("click", () => {
     if (samples.length >= 20) stopGps();
   }, e => { $("gpsinfo").textContent = "GPS недоступний: " + e.message; stopGps(); },
   { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+});
+
+// ------------------------------------------------------------ вимкнення Pi
+$("offbtn").addEventListener("click", async () => {
+  const recording = S.recording && S.recording.active;
+  if (!confirm("Вимкнути Raspberry Pi?" + (recording ? " Запис буде зупинено й збережено." : "")
+      + " Увімкнути знову можна лише перепідключивши живлення.") || !ensurePin()) return;
+  if (recording) await sendGps();         // досилаємо останні точки GPS у запис
+  try {
+    const res = await post("/api/shutdown", {});
+    stopTrack(); rec.owner = ""; store.set("rec", ""); rec.queue = [];
+    banner(res.message); window.scrollTo({ top: 0, behavior: "smooth" });
+    toast(res.message, 15000);
+  } catch (e) { toast(e.message, 8000); }
 });
 
 // ------------------------------------------------------------ калібрування

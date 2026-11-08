@@ -161,6 +161,29 @@ class RecorderTest(unittest.TestCase):
         with self.assertRaises(EditError):
             self.ws.record_stop({"pin": "1234"})
 
+    def test_shutdown_saves_recording_then_powers_off(self):
+        calls = []
+        self.ws.poweroff = lambda check=False: calls.append(check) or True
+        with self.assertRaises(PermissionError):
+            self.ws.shutdown({})
+        self.ws.record_start({"pin": "1234"})
+        self.recorder.write_rx("AAAAAAAAAAAA,-60.0,8.0,14")
+        with mock.patch("time.sleep"), mock.patch("threading.Thread") as thread:
+            msg = self.ws.shutdown({"pin": "1234"})["message"]
+            thread.call_args.kwargs["target"]()                    # те, що потік зробив би через 2 с
+        self.assertIn("Запис збережено", msg)
+        self.assertFalse(self.recorder.active)
+        self.assertEqual(len(os.listdir(self.dir)), 1)
+        self.assertEqual(calls, [True, False])                     # спершу перевірка дозволу, потім вимкнення
+
+        self.ws.poweroff = lambda check=False: False               # служба без дозволу (sudoers)
+        with self.assertRaises(EditError) as ctx:
+            self.ws.shutdown({"pin": "1234"})
+        self.assertIn("install-raspberry.sh", str(ctx.exception))
+        viewer = WebState(self.cfg, None, self.readings, types.SimpleNamespace(status="ok"))
+        with self.assertRaises(EditError):
+            viewer.shutdown({})
+
     def test_no_recorder_in_replay(self):
         viewer = WebState(self.cfg, None, self.readings, types.SimpleNamespace(status="ok"))
         with self.assertRaises(EditError):

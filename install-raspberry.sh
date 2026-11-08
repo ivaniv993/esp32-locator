@@ -15,6 +15,7 @@
 #   ~/.config/esp32-locator/config.json     — ваші налаштування і маяки (не перезаписуються)
 #   ~/.config/autostart/esp32-locator.desktop — автозапуск з екраном
 #   /etc/systemd/system/esp32-locator.service — служба без екрана (--service)
+#   /etc/sudoers.d/esp32-locator            — дозвіл службі вимкнути Pi (кнопка на веб-сторінці)
 #
 # Оновлення: git pull у папці репозиторію і знову ./install-raspberry.sh
 set -e
@@ -35,6 +36,7 @@ TARGET_HOME="$(getent passwd "$TARGET_USER" | cut -d: -f6)"
 CONF_DIR="$TARGET_HOME/.config/esp32-locator"
 AUTOSTART="$TARGET_HOME/.config/autostart/esp32-locator.desktop"
 SERVICE="/etc/systemd/system/esp32-locator.service"
+SUDOERS="/etc/sudoers.d/esp32-locator"
 
 UART=0; AUTO=1; UNINSTALL=0; SVC=0; HTTPS=0
 for arg in "$@"; do
@@ -44,7 +46,7 @@ for arg in "$@"; do
     --service) SVC=1 ;;
     --https) HTTPS=1 ;;
     --uninstall) UNINSTALL=1 ;;
-    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "Невідомий параметр: $arg (див. --help)"; exit 1 ;;
   esac
 done
@@ -59,6 +61,24 @@ remove_service() {
     $SUDO systemctl disable --now esp32-locator.service 2>/dev/null || true
     $SUDO rm -f "$SERVICE"
     $SUDO systemctl daemon-reload
+  fi
+  $SUDO rm -f "$SUDOERS"
+}
+
+# кнопка «Вимкнути Pi» на веб-сторінці: служба працює від користувача, тож дозволяємо йому без пароля
+# лише одну команду — systemctl poweroff (обидва шляхи: на старіших системах systemctl лежить у /bin)
+allow_poweroff() {
+  [ "$TARGET_USER" = "root" ] && return
+  local tmp="$SUDOERS.new"     # файли з крапкою в назві sudo не читає — поки не перевірено, він не діє
+  printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl poweroff, /bin/systemctl poweroff\n' "$TARGET_USER" \
+    | $SUDO tee "$tmp" >/dev/null
+  $SUDO chmod 440 "$tmp"
+  if $SUDO visudo -cf "$tmp" >/dev/null; then
+    $SUDO mv "$tmp" "$SUDOERS"
+    echo "Службі дозволено вимикати Pi (кнопка «Вимкнути Pi» на сторінці)."
+  else
+    $SUDO rm -f "$tmp"
+    echo "Увага: не вдалося додати дозвіл на вимкнення — кнопка «Вимкнути Pi» не працюватиме."
   fi
 }
 
@@ -148,6 +168,7 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 UNIT
+  allow_poweroff
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable esp32-locator.service
   $SUDO systemctl restart esp32-locator.service
