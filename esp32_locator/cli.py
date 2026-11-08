@@ -2,6 +2,7 @@
 import argparse
 import glob
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -15,7 +16,7 @@ from .mavlink import MavlinkSender, make_publisher, pymavlink_available
 from .web import WebState, addresses, ensure_certificate, start_server
 from .protocol import norm_mac
 from .readings import Readings
-from .session import (SessionWriter, default_recordings_dir, describe, load_session, make_header,
+from .session import (Recorder, SessionWriter, default_recordings_dir, describe, load_session, make_header,
                       new_session_path, radio_label, session_config)
 from .solver import Locator, distance_from_loss
 from .sources import ReplaySource, SerialReader
@@ -61,6 +62,26 @@ def parse_truth(cfg, raw):
     return frame_from_config(cfg["geo"]).to_local(lat, lon)
 
 
+def set_mode(cfg, path, mode):
+    """--mode: перемикає режим у config.json. З бойового в тестовий маяки переходять з метрами сітки;
+    у бойовий — лише якщо маяків немає або в усіх уже є широта й довгота."""
+    if cfg["mode"] == mode:
+        print(f"Режим уже {MODES[mode]}.")
+        return
+    if mode == "field":
+        missing = [t.get("name") or t["mac"] for t in cfg["transmitters"] if "lat" not in t or "lon" not in t]
+        if missing:
+            sys.exit(f"У бойовому режимі маяки задаються широтою й довготою, а в {', '.join(missing)} їх немає. "
+                     f"Видаліть ці маяки (--remove ID) і задайте заново на веб-сторінці або через --add-geo.")
+    else:
+        for t in cfg["transmitters"]:               # x, y уже пораховано з широти й довготи при завантаженні
+            t.pop("lat", None)
+            t.pop("lon", None)
+    cfg["mode"] = mode
+    save_config(path, cfg)
+    print(f"Режим: {MODES[mode]}. Якщо працює служба, перезапустіть її: sudo systemctl restart esp32-locator")
+
+
 def start_mavlink(cfg, args):
     """Для --mavlink: запускає MavlinkSender і повертає (sender, функція публікації); без --mavlink — (None, None).
     Положення в ArduPilot передається як широта й довгота, тож потрібен бойовий режим."""
@@ -91,9 +112,10 @@ def combine(*callbacks):
     return call
 
 
-def start_web(cfg, args, readings, source, link=None, cfg_path=None, truth=None):
+def start_web(cfg, args, readings, source, link=None, cfg_path=None, truth=None, recorder=None):
     """Для --web: запускає веб-сервер і повертає його on_update(loc); без --web — None.
-    cfg_path=None — сторінка лише показує (запис, відтворення); інакше на ній можна змінювати маяки."""
+    cfg_path=None — сторінка лише показує (запис, відтворення); інакше на ній можна змінювати маяки.
+    recorder — session.Recorder: запис кнопкою на сторінці (звичайний режим)."""
     if args.web is None:
         return None
     port = args.web or cfg["web"]["port"]
@@ -103,7 +125,7 @@ def start_web(cfg, args, readings, source, link=None, cfg_path=None, truth=None)
             tls = ensure_certificate(os.path.dirname(os.path.abspath(args.config)))
         except (OSError, subprocess.CalledProcessError) as e:
             sys.exit(f"Не вдалося створити сертифікат для HTTPS (потрібен openssl): {e}")
-    state = WebState(cfg, cfg_path, readings, source, link, truth, pin=cfg["web"]["pin"])
+    state = WebState(cfg, cfg_path, readings, source, link, truth, pin=cfg["web"]["pin"], recorder=recorder)
     try:
         start_server(state, port, tls=tls)
     except OSError as e:
@@ -112,6 +134,8 @@ def start_web(cfg, args, readings, source, link=None, cfg_path=None, truth=None)
     print("Веб-сторінка: " + "  або  ".join(f"{scheme}://{a}:{port}" for a in addresses()))
     if cfg_path is not None and not state.pin:
         print("Увага: web.pin у config.json не задано — маяки може змінити кожен, хто відкрив сторінку.")
+    if recorder:
+        print(f"Записи з веб-сторінки: {recorder.directory}")
     return state.on_update
 
 
@@ -239,7 +263,12 @@ def replay(cfg, args):
     readings = Readings(rcfg["window_sec"], keep_recent=KEEP_RECENT)
     link, publish = start_mavlink(rcfg, args)       # запис можна «прогнати» через контролер на стенді
     source = ReplaySource(session, readings, rcfg["default_tx_power_dbm"], loop=args.loop)
-    publish = combine(publish, start_web(rcfg, args, readings, source, link, truth=session.truth))
+    truth = session.truth
+    if session.moving:                              # приймач носили: справжнє положення рухається за GPS
+        truth = (lambda: session.truth_at(source.elapsed)) if session.track else None
+        if not session.track:
+            print("У записі немає GPS телефона — справжнє положення не показується.")
+    publish = combine(publish, start_web(rcfg, args, readings, source, link, truth=truth))
     source.start()
     note = session.header.get("note")
     banner = (f"▶ {os.path.basename(args.replay)}" + (f"  ·  {radio_label(session.radio)}" if session.radio else "")
@@ -248,7 +277,7 @@ def replay(cfg, args):
         if args.headless:
             run_headless(rcfg, readings, source, publish, link)
         else:
-            run_gui(rcfg, None, readings, source, truth=session.truth, banner=banner, on_update=publish, link=link)
+            run_gui(rcfg, None, readings, source, truth=truth, banner=banner, on_update=publish, link=link)
     except KeyboardInterrupt:
         pass
 
@@ -346,8 +375,12 @@ def main():
     ap.add_argument("--loop", action="store_true", help="--replay по колу")
     ap.add_argument("--name", help="назва маяка для --add / --add-geo")
     g.add_argument("--ports", action="store_true", help="показати послідовні порти цієї плати")
+    g.add_argument("--mode", choices=sorted(MODES), help="перемкнути режим: local — тестовий (метри), "
+                                                         "field — бойовий (широта й довгота)")
     ap.add_argument("--port", help="порт приймача, наприклад /dev/ttyUSB0 або /dev/ttyS5")
     args = ap.parse_args()
+    # systemctl stop / restart надсилає SIGTERM: завершуємось як після Ctrl+C, щоб запис закрився як слід
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     try:
         cfg = load_config(args.config)
@@ -357,7 +390,7 @@ def main():
         cfg["serial_port"] = args.port
     field = cfg["mode"] == "field"
     other_command = args.add or args.add_geo or args.remove or args.list or args.ports or args.calibrate \
-        or args.info or args.evaluate
+        or args.info or args.evaluate or args.mode
     if (args.web is not None or args.web_https) and other_command:
         sys.exit("--web працює зі звичайним режимом, --record або --replay")
     if args.web_https and args.web is None:
@@ -423,13 +456,19 @@ def main():
         info(cfg, args)
     elif args.evaluate:
         evaluate(cfg, args)
+    elif args.mode:
+        set_mode(cfg, args.config, args.mode)
     else:
         readings = Readings(cfg["window_sec"], keep_recent=KEEP_RECENT)
+        # з --web запис вмикають кнопкою на сторінці; поки запису немає, write_rx нічого не робить
+        recorder = Recorder(cfg, args.out or default_recordings_dir(cfg)) if args.web is not None else None
         reader = SerialReader(cfg["serial_port"], cfg["baud"], readings, cfg["default_tx_power_dbm"],
+                              on_line=recorder.write_rx if recorder else None,
                               exclude=[args.mavlink] if args.mavlink else ())
         reader.start()
         link, publish = start_mavlink(cfg, args)
-        publish = combine(publish, start_web(cfg, args, readings, reader, link, cfg_path=args.config))
+        publish = combine(publish, start_web(cfg, args, readings, reader, link, cfg_path=args.config, recorder=recorder),
+                          recorder.on_update if recorder else None)
         try:
             if args.headless:
                 run_headless(cfg, readings, reader, publish, link)
@@ -437,3 +476,8 @@ def main():
                 run_gui(cfg, args.config, readings, reader, on_update=publish, link=link)
         except KeyboardInterrupt:
             pass
+        finally:
+            if recorder and recorder.active:
+                res = recorder.stop()
+                if res and res["path"]:
+                    print(f"Запис зупинено: {res['path']}")

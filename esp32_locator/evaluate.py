@@ -2,6 +2,7 @@
 
 Алгоритм крокує по запису на симульованому годиннику з тим самим кроком, що й екран,
 і тими самими Readings та Locator, тож результат збігається з роботою на живому приймачі.
+Якщо приймач носили (запис з веб-сторінки), справжнє положення на кожному кроці — трек GPS телефона.
 """
 import json
 import math
@@ -19,33 +20,59 @@ MIN_BEACONS = 3       # менше маяків — положення не ви
 TOLERANCE = 0.02      # м, різниця середньої похибки, меншу за яку вважаємо шумом
 COVERAGE_TOLERANCE = 0.01
 BASELINE_VERSION = 1
+LAGS = [i * 0.5 for i in range(11)]   # с: затримки, з якими порівнюємо визначене положення з GPS (0…5 с)
 
 
 @dataclass
 class Result:
     name: str
-    truth: tuple
+    truth: tuple       # де стояв приймач; None — його носили, тоді справжнє положення в truths
     duration: float
-    ticks: int
+    ticks: int         # кроки, на яких відомо справжнє положення
     fixes: list        # [(x, y)] оцінки на кроках, де чути ≥ MIN_BEACONS маяків
     sf: int = None     # SF із запису (None — не вказано)
+    truths: list = None    # приймач носили: [(x, y)] за GPS телефона для кожної оцінки
+    lag: tuple = None      # приймач носили: (затримка, с; середня похибка, м) — найкращий збіг із GPS
+    gps_acc: float = None  # медіанна точність GPS телефона, м
 
     @property
     def errors(self):
-        return [math.hypot(x - self.truth[0], y - self.truth[1]) for x, y in self.fixes]
+        truths = self.truths if self.truth is None else [self.truth] * len(self.fixes)
+        return [math.hypot(x - tx, y - ty) for (x, y), (tx, ty) in zip(self.fixes, truths)]
 
     def metrics(self):
         m = summarize(self.errors, self.ticks)
         m["duration"] = self.duration
-        b = bias(self.fixes, self.truth)
+        ref = self.truth
+        if ref is None and self.truths:             # середнє (оцінка − GPS) = середня оцінка − середня точка GPS
+            ref = (sum(p[0] for p in self.truths) / len(self.truths), sum(p[1] for p in self.truths) / len(self.truths))
+        b = bias(self.fixes, ref) if ref else None
         m["bias_x"], m["bias_y"] = b if b else (None, None)
-        m["spread"] = spread(self.fixes)
+        m["spread"] = spread(self.fixes) if self.truth is not None else None   # у русі «тремтіння» не виміряти
         m["sf"] = self.sf
         return m
 
 
+def best_lag(session, times, fixes):
+    """Приймач носили: з якою затримкою визначене положення найкраще збігається з GPS
+    (вікно медіани й згладжування відстають від руху). (затримка, с; середня похибка, м) або None."""
+    best = None
+    for lag in LAGS:
+        errs = []
+        for t, (x, y) in zip(times, fixes):
+            p = session.truth_at(t - lag)
+            if p:
+                errs.append(math.hypot(x - p[0], y - p[1]))
+        if errs and len(errs) >= len(fixes) / 2:
+            mean = sum(errs) / len(errs)
+            if best is None or mean < best[1] - 1e-9:
+                best = (lag, mean)
+    return best
+
+
 def evaluate_session(session, cfg, step=STEP):
-    """Прогін алгоритму по одній сесії. Перші window_sec секунд пропускаються: вікно ще не заповнене."""
+    """Прогін алгоритму по одній сесії. Перші window_sec секунд пропускаються: вікно ще не заповнене.
+    Кроки, на яких справжнє положення невідоме (приймач носили, а GPS поруч немає), не рахуються."""
     rcfg = session_config(cfg, session)
     readings = Readings(rcfg["window_sec"])
     locator = Locator(rcfg, readings)
@@ -55,7 +82,7 @@ def evaluate_session(session, cfg, step=STEP):
         if got:
             events.append((t, got))
 
-    fixes, ticks, i, k = [], 0, 0, 0
+    fixes, truths, times, ticks, i, k = [], [], [], 0, 0, 0
     while k * step <= session.duration + 1e-9:
         now, k = k * step, k + 1
         while i < len(events) and events[i][0] <= now:
@@ -64,10 +91,19 @@ def evaluate_session(session, cfg, step=STEP):
         locator.update(now)
         if now < rcfg["window_sec"]:
             continue
+        truth = session.truth_at(now)
+        if truth is None:
+            continue
         ticks += 1
         if locator.heard >= MIN_BEACONS and locator.pos:
             fixes.append(locator.pos)
-    return Result(os.path.basename(session.path), session.truth, session.duration, ticks, fixes, session.sf)
+            truths.append(truth)
+            times.append(now)
+    name = os.path.basename(session.path)
+    if not session.moving:
+        return Result(name, session.truth, session.duration, ticks, fixes, session.sf)
+    return Result(name, None, session.duration, ticks, fixes, session.sf, truths=truths,
+                  lag=best_lag(session, times, fixes), gps_acc=session.gps_accuracy())
 
 
 def collect_paths(args):
@@ -147,6 +183,18 @@ def format_report(results, cfg):
         lines += ["-" * len(HEADER), _row(f"Разом ({len(results)})", {**total_metrics(results), "duration": sum(r.duration for r in results)}, extra=False)]
     if len({r.sf for r in results}) > 1:
         lines += ["", "Увага: записи зроблено з різним SF — різниця в похибці може бути через радіо, а не через алгоритм."]
+    moving = [r for r in results if r.truth is None]
+    if moving:
+        lines += ["", "Приймач носили — похибка відносно GPS телефона (він і сам помиляється на кілька метрів):"]
+    for r in moving:
+        if not r.ticks:
+            lines.append(f"  {r.name}: GPS телефона немає — порівнювати нема з чим.")
+            continue
+        text = f"  {r.name}: точність GPS ±{_f(r.gps_acc, 0)} м"
+        if r.lag and r.lag[0] > 0:
+            text += (f"; найменша середня похибка {r.lag[1]:.2f} м — якщо порівнювати з положенням "
+                     f"{r.lag[0]:g} с тому (визначене положення відстає від руху: вікно й згладжування)")
+        lines.append(text + ".")
     return "\n".join(lines)
 
 

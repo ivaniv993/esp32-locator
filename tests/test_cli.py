@@ -92,6 +92,21 @@ class CliTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("переплутано", out)
 
+    def test_switch_mode(self):
+        self.write_cfg(transmitters=[{"name": "A", "mac": "A" * 12, "x": 1, "y": 1}])
+        code, out = run("--config", self.cfg, "--mode", "field")
+        self.assertEqual(code, 1)                          # маяк у метрах у бойовий режим не переходить
+        self.assertIn("--remove", out)
+        self.assertEqual(self.raw_cfg().get("mode", "local"), "local")
+        run("--config", self.cfg, "--remove", "A" * 12)
+        code, out = run("--config", self.cfg, "--mode", "field")
+        self.assertEqual((code, self.raw_cfg()["mode"]), (0, "field"))
+        self.assertIn("systemctl restart", out)
+        run("--config", self.cfg, "--add-geo", "B" * 12, "50.4501", "30.5234")
+        self.assertEqual(run("--config", self.cfg, "--mode", "local")[0], 0)   # назад — маяки лишаються в метрах
+        self.assertEqual(self.raw_cfg()["transmitters"], [{"name": "A", "mac": "B" * 12, "x": 10.0, "y": 10.0}])
+        self.assertIn("уже", run("--config", self.cfg, "--mode", "local")[1])
+
     def test_wrong_command_for_mode(self):
         self.write_cfg()
         code, out = run("--config", self.cfg, "--add-geo", "A1B2C3D4E5F6", "50.4501", "30.5234")

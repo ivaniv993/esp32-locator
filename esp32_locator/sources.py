@@ -80,6 +80,14 @@ class ReplaySource(threading.Thread):
         self.default_txp, self.loop = default_txp, loop
         self.name_ = os.path.basename(session.path)
         self.status = f"Відтворення: {self.name_}"
+        self._start = None
+
+    @property
+    def elapsed(self):
+        """Секунда запису, що відтворюється зараз (для руху справжнього положення за GPS)."""
+        if self._start is None:
+            return 0.0
+        return min(time.monotonic() - self._start, self.session.duration)
 
     def run(self):
         total = self.session.duration
@@ -87,7 +95,7 @@ class ReplaySource(threading.Thread):
             self.status = f"У записі немає пакетів: {self.name_}"
             return
         while True:
-            start = time.monotonic()
+            start = self._start = time.monotonic()
             for t, line in self.session.rx:
                 delay = start + t - time.monotonic()
                 if delay > 0:

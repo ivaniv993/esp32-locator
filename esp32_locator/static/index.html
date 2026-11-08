@@ -18,6 +18,7 @@
   .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
   .dot.ok { background: var(--truth); } .dot.bad { background: var(--danger); }
   .chip { font-size: 12px; color: var(--muted); border: 1px solid var(--major); border-radius: 99px; padding: 2px 8px; }
+  .chip.rec { color: var(--danger); border-color: var(--danger); display: none; }
   main { max-width: 1100px; margin: 0 auto; padding: 0 16px 32px; display: grid; gap: 14px; }
   @media (min-width: 900px) { main { grid-template-columns: 1fr 360px; align-items: start; } #mapbox { grid-row: span 4; } }
   #mapbox { position: relative; background: var(--paper); border-radius: 12px; overflow: hidden; margin-top: 14px; }
@@ -63,6 +64,7 @@
 <header>
   <span class="dot" id="conn"></span>
   <h1>LoRa-локатор</h1>
+  <span class="chip rec" id="recchip">● запис</span>
   <span class="chip" id="mode">—</span>
 </header>
 <main>
@@ -72,6 +74,14 @@
     <h2 id="poslabel">Положення приймача</h2>
     <div id="pos" class="big muted">невідоме</div>
     <div id="posinfo" class="small muted"></div>
+    <div id="phoneinfo" class="small ok"></div>
+  </section>
+
+  <section id="recbox" style="display:none">
+    <h2>Запис</h2>
+    <div id="rec"></div>
+    <div id="recinfo" class="small" style="margin-top:8px"></div>
+    <div id="rechint" class="small muted" style="margin-top:6px"></div>
   </section>
 
   <section>
@@ -164,6 +174,7 @@ async function poll() {
     if (!r.ok) throw new Error(r.status);
     const s = await r.json(); lastOk = Date.now();
     if (s.beacons) { S = s; render(); }        // до першого перерахунку положення стан порожній
+    sendGps();                                 // дослати точки GPS, якщо зв’язок пропадав
   } catch (e) { /* зв’язок перевіряється нижче */ }
   $("conn").className = "dot " + (Date.now() - lastOk < 3000 ? "ok" : "bad");
   if (Date.now() - lastOk >= 3000) $("status").innerHTML = '<span class="err">Немає зв’язку з Raspberry Pi</span>';
@@ -191,6 +202,16 @@ function render() {
     $("pos").className = "big muted"; $("pos").textContent = "невідоме";
     $("posinfo").innerHTML = `<span class="warn">Чути маяків: ${S.heard} з ${S.beacons.length}. Потрібно щонайменше 3.</span>`;
   }
+  const ph = phoneShown();
+  if (ph) {
+    let t = (ph.replay ? "GPS із запису: " : "GPS телефона: ")
+      + (field() && ph.latlon ? `${ph.latlon[0].toFixed(6)}, ${ph.latlon[1].toFixed(6)}` : `${fmt(ph.x)}; ${fmt(ph.y)} м`)
+      + (ph.acc != null ? ` (±${Math.round(ph.acc)} м)` : "");
+    if (rc && rc.fix) t += ` · до визначеного ${fmt(Math.hypot(rc.x - ph.x, rc.y - ph.y))} м`;
+    if (!ph.replay && ph.age > 5) t += ` · ${Math.round(ph.age)} с тому`;
+    $("phoneinfo").textContent = t;
+  } else $("phoneinfo").textContent = "";
+  renderRec();
 
   // Рядки й кнопки перебудовуються лише при зміні складу маяків, інакше оновлюються лише цифри:
   // якби кнопка перестворювалась кожні пів секунди, натискання на телефоні губилися б.
@@ -294,6 +315,25 @@ function draw() {
     const [x, y] = P(S.truth[0], S.truth[1]);
     g.strokeStyle = C.truth; g.lineWidth = 2; g.strokeRect(x - 9, y - 9, 18, 18); g.lineWidth = 1;
   }
+  const ph = phoneShown();
+  if (ph) {                                // GPS телефона — фактичне положення, з яким порівнюємо
+    const clamp = p => P(Math.min(aw, Math.max(0, p[0])), Math.min(ah, Math.max(0, p[1])));
+    g.fillStyle = C.truth;
+    S.phone_trail.forEach((p, i) => {
+      g.globalAlpha = .1 + .4 * i / S.phone_trail.length;
+      g.beginPath(); g.arc(...clamp(p), 2.5, 0, 2 * Math.PI); g.fill();
+    });
+    const [x, y] = clamp([ph.x, ph.y]);
+    g.globalAlpha = ph.age > 5 && !ph.replay ? .4 : 1;
+    if (ph.acc) {
+      g.globalAlpha *= .15; g.beginPath(); g.arc(x, y, Math.min(ph.acc * scale, 4000), 0, 2 * Math.PI); g.fill();
+      g.globalAlpha /= .15;
+    }
+    g.beginPath(); g.arc(x, y, 7, 0, 2 * Math.PI); g.fill();
+    g.strokeStyle = C.paper; g.lineWidth = 2; g.stroke(); g.lineWidth = 1;
+    g.font = "600 12px system-ui, sans-serif"; g.textAlign = "center"; g.fillText("GPS", x, y + 22);
+    g.globalAlpha = 1;
+  }
   const rc = S.receiver;
   if (rc && rc.fix) {
     const [x, y] = P(Math.min(aw, Math.max(0, rc.x)), Math.min(ah, Math.max(0, rc.y)));
@@ -348,12 +388,15 @@ async function post(url, data) {
   if (!r.ok) throw new Error(res.error || r.status);
   return res;
 }
+function ensurePin() {
+  if (!S.pin_required || store.get("pin")) return true;
+  const pin = prompt("PIN");
+  if (!pin) return false;
+  store.set("pin", pin);
+  return true;
+}
 async function saveBeacon(data) {
-  if (S.pin_required && !store.get("pin")) {
-    const pin = prompt("PIN для зміни маяків");
-    if (!pin) return;
-    store.set("pin", pin);
-  }
+  if (!ensurePin()) return;
   try {
     const res = await post("/api/beacons", data);
     toast(res.warning ? `${res.message}. ${res.warning}` : res.message, res.warning ? 8000 : 3500);
@@ -408,6 +451,9 @@ $("delbtn").addEventListener("click", async () => {
 $("addbtn").addEventListener("click", () => openEditor("", false));
 document.addEventListener("click", ev => {
   const t = ev.target.closest("button"); if (!t) return;
+  if (t.dataset.rec === "start") startRec();
+  if (t.dataset.rec === "stop") stopRec();
+  if (t.dataset.rec === "claim") { rec.owner = S.recording.id; rec.since = Date.now(); store.set("rec", rec.owner); startTrack(); }
   if (t.dataset.edit) openEditor(t.dataset.edit, true);
   if (t.dataset.add) {
     if (field()) openEditor(t.dataset.add, false);
@@ -437,6 +483,125 @@ $("gpsbtn").addEventListener("click", () => {
   }, e => { $("gpsinfo").textContent = "GPS недоступний: " + e.message; stopGps(); },
   { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
 });
+
+// ------------------------------------------------------------ запис і GPS телефона під час запису
+// Телефон, що почав запис, надсилає свої точки GPS — фактичне положення, з яким потім порівнюють
+// визначене програмою. Кожна точка йде з віком (мс від отримання), тож годинник телефона не важливий.
+const rec = { owner: store.get("rec"), since: 0, watch: null, queue: [], sending: false, fix: null, err: "", sendErr: "", wake: null };
+const gpsOk = () => field() && window.isSecureContext && !!navigator.geolocation;
+const mmss = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, "0")}`;
+
+function phoneShown() {                  // GPS показуємо під час запису, у відтворенні і ще хвилину після
+  const ph = S && S.phone;
+  return ph && (ph.replay || ph.age < 60 || (S.recording && S.recording.active)) ? ph : null;
+}
+
+function renderRec() {
+  const R = S.recording;
+  $("recbox").style.display = R ? "" : "none";
+  $("recchip").style.display = R && R.active ? "inline-block" : "none";
+  if (!R) return;
+  const fresh = Date.now() - rec.since < 3000;  // стан, запитаний до натискання «Почати», ще не знає про запис
+  const mine = !!rec.owner && ((R.active && R.id === rec.owner) || fresh);
+  if (!R.active && rec.owner && !fresh) { rec.owner = ""; store.set("rec", ""); rec.queue = []; }
+  if (mine && rec.watch == null) startTrack();
+  if (!mine && rec.watch != null) stopTrack();
+
+  keyed($("rec"), JSON.stringify([R.active, mine, gpsOk()]), () => R.active ? `
+    <div class="actions" style="margin-top:0">
+      ${mine || !gpsOk() ? "" : '<button class="ghost" data-rec="claim">Писати GPS з цього телефона</button>'}
+      <button class="danger grow" data-rec="stop">■ Зупинити запис</button>
+    </div>` : `
+    <label for="recnote" style="margin-top:0">Опис (необов’язково)</label>
+    <input id="recnote" maxlength="200" autocomplete="off" placeholder="наприклад: обхід по периметру">
+    <div class="actions"><button class="primary grow" data-rec="start">● Почати запис</button></div>`);
+
+  if (R.active) {
+    $("recinfo").innerHTML = `<span class="err">●</span> ${mmss(R.duration)} · пакетів ${R.packets} · точок GPS ${R.gps}`;
+  } else $("recinfo").textContent = "";
+
+  let hint;
+  if (!field()) hint = "Тестовий режим: фактичне положення з GPS телефона не пишеться (лише в бойовому режимі).";
+  else if (!window.isSecureContext) hint = '<span class="warn">Сторінку відкрито без HTTPS — GPS телефона недоступний, '
+    + "тож фактичне положення не запишеться. Встановіть службу з --https і відкрийте https://…:8080.</span>";
+  else if (!R.active) hint = "Під час запису цей телефон надсилатиме свій GPS — фактичне положення для порівняння. "
+    + "Тримайте телефон разом із приймачем.";
+  else if (!mine) hint = "GPS пише телефон, що почав запис.";
+  else {
+    const gps = rec.err ? `<span class="warn">GPS: ${esc(rec.err)}</span>`
+      : rec.fix ? `<span class="ok">GPS цього телефона: ±${Math.round(rec.fix.acc)} м</span>` : "Чекаю GPS телефона…";
+    const queued = rec.queue.length > 3 ? ` · <span class="warn">не надіслано ${rec.queue.length}${rec.sendErr ? ": " + esc(rec.sendErr) : ""}</span>` : "";
+    hint = gps + queued + "<br>Не вимикайте екран і не перемикайтеся на інші програми — інакше браузер перестане передавати GPS.";
+  }
+  $("rechint").innerHTML = hint;
+}
+
+async function startRec() {
+  if (!ensurePin()) return;
+  try {
+    const res = await post("/api/record/start", { note: $("recnote") ? $("recnote").value.trim() : "" });
+    rec.owner = res.id; rec.since = Date.now(); store.set("rec", res.id); rec.queue = [];
+    startTrack();
+    toast(res.warning ? `${res.message}. ${res.warning}` : res.message, res.warning ? 8000 : 3500);
+  } catch (e) { toast(e.message, 6000); }
+}
+
+async function stopRec() {
+  if (!confirm("Зупинити запис?") || !ensurePin()) return;
+  await sendGps();                       // спершу досилаємо останні точки GPS
+  try {
+    const res = await post("/api/record/stop", {});
+    toast(res.message, 8000);
+  } catch (e) { toast(e.message, 6000); }
+  stopTrack(); rec.owner = ""; store.set("rec", ""); rec.queue = [];
+}
+
+function startTrack() {
+  if (!gpsOk() || rec.watch != null) return;
+  rec.err = "";
+  rec.watch = navigator.geolocation.watchPosition(p => {
+    const c = p.coords;
+    rec.fix = { acc: c.accuracy }; rec.err = "";
+    rec.queue.push({ lat: c.latitude, lon: c.longitude, acc: c.accuracy, at: Date.now() });
+    if (rec.queue.length > 3600) rec.queue.splice(0, rec.queue.length - 3600);
+    sendGps();
+  }, e => {
+    rec.err = e.code === 1 ? "доступ до геолокації заборонено — дозвольте його для цієї сторінки в налаштуваннях браузера"
+      : e.code === 3 ? "немає сигналу супутників" : e.message;
+  }, { enableHighAccuracy: true, maximumAge: 0, timeout: 30000 });
+  keepAwake();
+}
+
+function stopTrack() {
+  if (rec.watch != null) navigator.geolocation.clearWatch(rec.watch);
+  rec.watch = null; rec.fix = null;
+  if (rec.wake) { rec.wake.release().catch(() => {}); rec.wake = null; }
+}
+
+async function keepAwake() {             // екран не гасне, поки йде запис (браузер приспав би GPS)
+  if (!navigator.wakeLock || rec.wake) return;
+  try {
+    rec.wake = await navigator.wakeLock.request("screen");
+    rec.wake.addEventListener("release", () => { rec.wake = null; });
+  } catch (e) { /* не підтримується або сторінка не на екрані */ }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && rec.watch != null) keepAwake();
+});
+
+async function sendGps() {
+  if (rec.sending || !rec.queue.length || !S) return;
+  rec.sending = true;
+  try {
+    while (rec.queue.length) {
+      const batch = rec.queue.slice(0, 50), now = Date.now();
+      const res = await post("/api/gps", { points: batch.map(p => ({ lat: p.lat, lon: p.lon, acc: p.acc, age: now - p.at })) });
+      rec.queue.splice(0, batch.length); rec.sendErr = "";
+      if (res.recording === false) { rec.queue = []; break; }
+    }
+  } catch (e) { rec.sendErr = e.message; }
+  finally { rec.sending = false; }
+}
 
 poll();
 </script>

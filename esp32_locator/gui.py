@@ -32,7 +32,8 @@ def mix(c1, c2, t):
 def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=None, link=None):
     """readings і reader (потік із полем status) створює і запускає викликач.
     cfg_path=None — режим перегляду: маяки не можна реєструвати з екрана (запис, відтворення).
-    truth — справжнє положення приймача (x, y): малюється на мапі разом із похибкою.
+    truth — справжнє положення приймача (x, y): малюється на мапі разом із похибкою; або функція,
+    що повертає його на поточний момент (відтворення запису, де приймач носили) чи None.
     banner — рядок угорі мапи (наприклад, «● Запис»).
     on_update(loc) — викликається після кожного перерахунку положення (передача в ArduPilot);
     link — об’єкт з полем status (з’єднання з ArduPilot), показується внизу панелі."""
@@ -167,6 +168,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
                                   time.monotonic())
 
         now = time.monotonic()
+        now_truth = truth() if callable(truth) else truth    # у записі, де приймач носили, — точка GPS
         feed.update(cfg["transmitters"])
         if now - last_calc >= 0.2:
             last_calc = now
@@ -249,8 +251,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
             pygame.draw.circle(screen, EST, c, 14, 3)
             pygame.draw.line(screen, EST, (c[0] - 20, c[1]), (c[0] + 20, c[1]), 2)
             pygame.draw.line(screen, EST, (c[0], c[1] - 20), (c[0], c[1] + 20), 2)
-        if truth:     # справжнє положення приймача (зі запису або з --truth)
-            c = P(*truth)
+        if now_truth:  # справжнє положення приймача (зі запису або з --truth)
+            c = P(*now_truth)
             pygame.draw.rect(screen, TRUTH, (c[0] - 9, c[1] - 9, 18, 18), 2)
             text(screen, "справжнє", f_small, TRUTH, (c[0], c[1] + 14), "midtop")
         if geo_frame:  # у бойовому режимі мапа завжди північчю вгору
@@ -268,7 +270,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
             text(screen, f"{active.get('name')} вибрано: перетягніть, щоб перемістити   Delete — видалити   Esc — зняти",
                  f_small, EST, (map_rect.x + 16, map_rect.y + 8))
         elif banner:
-            text(screen, banner, f_txt, TRUTH if truth else TX, (map_rect.x + 16, map_rect.y + 6))
+            text(screen, banner, f_txt, TRUTH if now_truth else TX, (map_rect.x + 16, map_rect.y + 6))
 
         # --- журнал пакетів: за порядком надходження, нові внизу
         if log_rect:
@@ -301,9 +303,9 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
                 text(screen, f"x = {fmt(loc.pos[0])} м", f_big, EST, (x, y)); y += 32
                 text(screen, f"y = {fmt(loc.pos[1])} м", f_big, EST, (x, y)); y += 34
             text(screen, f"Узгодженість вимірів: ±{fmt(loc.rms, 1)} м", f_small, MUTED, (x, y)); y += 22
-            if truth:
-                err = math.hypot(loc.pos[0] - truth[0], loc.pos[1] - truth[1])
-                where = "" if geo_frame else f"  (справжнє {fmt(truth[0], 1)}; {fmt(truth[1], 1)})"
+            if now_truth:
+                err = math.hypot(loc.pos[0] - now_truth[0], loc.pos[1] - now_truth[1])
+                where = "" if geo_frame else f"  (справжнє {fmt(now_truth[0], 1)}; {fmt(now_truth[1], 1)})"
                 text(screen, f"Похибка: {fmt(err, 2)} м{where}", f_small, TRUTH, (x, y)); y += 22
         else:
             text(screen, "невідоме", f_big, MUTED, (x, y)); y += 40

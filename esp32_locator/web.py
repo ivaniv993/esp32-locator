@@ -7,6 +7,11 @@
 Зміни маяків (POST /api/beacons, /api/beacons/delete) — лише у звичайному режимі (не запис і не
 відтворення) і, якщо в config.json задано web.pin, лише з цим PIN. Тестовий режим — метри x, y;
 бойовий — широта й довгота (сітка мапи після зміни перераховується, як при запуску).
+
+Запис (POST /api/record/start, /api/record/stop) — теж у звичайному режимі: приймач можна носити,
+а телефон, що почав запис, надсилає свої точки GPS (POST /api/gps) — це фактичне положення для
+порівняння. Кожна точка приходить із тим, скільки мілісекунд тому телефон її отримав (age): час
+точки рахується за годинником Pi, тож годинник телефона на це не впливає.
 """
 import hmac
 import json
@@ -26,9 +31,11 @@ from .packetlog import PacketFeed, format_row
 from .protocol import norm_mac
 
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
-MAX_BODY = 4096
+MAX_BODY = 8192
 TRAIL = 120
 LOG_ROWS = 40
+MAX_GPS_POINTS = 60          # точок GPS в одному запиті (телефон надсилає пачками, якщо зв’язок пропадав)
+MAX_GPS_AGE = 600.0          # с: старіші точки (телефон довго був без зв’язку) не пишемо
 
 
 class EditError(ValueError):
@@ -43,13 +50,20 @@ def next_name(transmitters):
 class WebState:
     """Стан для сторінки й зміни маяків. cfg — той самий об’єкт, з яким працюють Locator і екран."""
 
-    def __init__(self, cfg, cfg_path, readings, source, link=None, truth=None, pin=None):
+    def __init__(self, cfg, cfg_path, readings, source, link=None, truth=None, pin=None, recorder=None):
         self.cfg, self.cfg_path = cfg, cfg_path          # cfg_path=None — лише перегляд (запис, відтворення)
-        self.readings, self.source, self.link, self.truth = readings, source, link, truth
+        self.readings, self.source, self.link = readings, source, link
+        # truth — де стоїть приймач (x, y), або функція без аргументів → (x, y) | None, якщо приймач
+        # рухається (відтворення запису з GPS телефона): тоді положення показується як «GPS телефона»
+        self.truth = truth
+        self.recorder = recorder                          # session.Recorder — запис кнопкою на сторінці
         self.pin = str(pin) if pin else ""
         self.lock = threading.Lock()
         self.feed = PacketFeed(readings, maxlen=LOG_ROWS)
         self.trail = deque(maxlen=TRAIL)
+        self.phone = None                                 # (x, y, acc, monotonic-час точки) — останній GPS
+        self.phone_trail = deque(maxlen=TRAIL)
+        self._phone_trail_at = 0.0
         self._json = b"{}"
         self._geo_src = object()
         self._frame = None
@@ -61,6 +75,10 @@ class WebState:
         return self.cfg_path is not None
 
     @property
+    def recording(self):
+        return bool(self.recorder and self.recorder.active)
+
+    @property
     def field(self):
         return self.cfg.get("mode") == "field"
 
@@ -69,7 +87,16 @@ class WebState:
         if geo is not self._geo_src:                      # сітка бойового режиму змінилась (нові маяки)
             self._geo_src, self._frame = geo, frame_from_config(geo)
             self.trail.clear()
+            self.phone, self.phone_trail = None, deque(maxlen=TRAIL)
         return self._frame
+
+    def _set_phone(self, x, y, acc, at):
+        """Нова точка «GPS телефона» (живий GPS або трек із запису). Викликати під self.lock."""
+        if not self.phone_trail or abs(at - self._phone_trail_at) >= 0.5:    # слід — не частіше ніж раз на 0,5 с
+            self.phone_trail.append((round(x, 2), round(y, 2)))
+            self._phone_trail_at = at
+        if self.phone is None or at >= self.phone[3]:
+            self.phone = (x, y, acc, at)
 
     # ------------------------------------------------------------ стан для сторінки
     def on_update(self, loc):
@@ -92,6 +119,18 @@ class WebState:
             def latlon(x, y):
                 return [round(v, 7) for v in frame.to_latlon(x, y)] if frame else None
 
+            truth = self.truth
+            if callable(truth):                           # відтворення запису, де приймач носили
+                p = truth()
+                if p:
+                    self._set_phone(p[0], p[1], None, now)
+                truth = None
+            phone = None
+            if self.phone:
+                x, y, acc, at = self.phone
+                phone = {"x": round(x, 2), "y": round(y, 2), "latlon": latlon(x, y),
+                         "acc": acc, "age": round(now - at, 1), "replay": callable(self.truth)}
+
             receiver = None
             if loc.pos:
                 receiver = {"x": round(loc.pos[0], 2), "y": round(loc.pos[1], 2), "latlon": latlon(*loc.pos),
@@ -99,7 +138,7 @@ class WebState:
             state = {
                 "mode": self.cfg.get("mode", "local"),
                 "area": self.cfg["area"],
-                "editable": self.editable,
+                "editable": self.editable and not self.recording,
                 "pin_required": bool(self.pin),
                 "beacons": [{"name": t.get("name") or "", "mac": t["mac"], "x": t["x"], "y": t["y"],
                              "latlon": [t["lat"], t["lon"]] if "lat" in t else latlon(t["x"], t["y"]),
@@ -110,8 +149,11 @@ class WebState:
                 "unknown": [{"mac": m, "rssi": round(r["rssi"], 1), "distance": round(d, 2)} for m, r, d in loc.unknown],
                 "receiver": receiver,
                 "heard": loc.heard,
-                "truth": list(self.truth) if self.truth else None,
+                "truth": list(truth) if truth else None,
                 "trail": list(self.trail),
+                "phone": phone,
+                "phone_trail": list(self.phone_trail),
+                "recording": self.recorder.status() if self.recorder else None,
                 "log": [{"text": format_row(r), "known": r.name is not None} for r in list(self.feed.rows)[-LOG_ROWS:]],
                 "status": self.source.status,
                 "link": self.link.status if self.link else None,
@@ -125,11 +167,16 @@ class WebState:
             return self._json
 
     # ------------------------------------------------------------ зміни маяків
+    def _auth(self, pin):
+        if self.pin and not hmac.compare_digest(str(pin or ""), self.pin):
+            raise PermissionError("Неправильний PIN.")
+
     def check_pin(self, pin):
         if not self.editable:
             raise EditError("Під час запису й відтворення маяки змінювати не можна.")
-        if self.pin and not hmac.compare_digest(str(pin or ""), self.pin):
-            raise PermissionError("Неправильний PIN.")
+        self._auth(pin)
+        if self.recording:
+            raise EditError("Йде запис — зупиніть його, щоб змінити маяки.")
 
     def _commit(self, mutate):
         """mutate(новий список маяків) → перевірка → заміна в cfg одним присвоєнням → збереження config.json."""
@@ -203,6 +250,63 @@ class WebState:
             return f"Видалено {mac}"
         return self._commit(mutate)
 
+    # ------------------------------------------------------------ запис і GPS телефона
+    def _need_recorder(self, pin):
+        if not self.recorder:
+            raise EditError("Запис зі сторінки доступний лише у звичайному режимі (не під час --record чи --replay).")
+        self._auth(pin)
+
+    def record_start(self, data):
+        self._need_recorder(data.get("pin"))
+        note = str(data.get("note") or "").strip()[:200]
+        try:
+            path = self.recorder.start(note)
+        except (ValueError, OSError) as e:
+            raise EditError(f"Запис не почато: {e}") from None
+        with self.lock:
+            self.phone, self.phone_trail = None, deque(maxlen=TRAIL)
+        warn = "Маяків менше 3 — положення не визначатиметься." if len(self.cfg["transmitters"]) < 3 else None
+        return {"ok": True, "id": os.path.basename(path), "message": f"Запис почато: {os.path.basename(path)}",
+                "warning": warn}
+
+    def record_stop(self, data):
+        self._need_recorder(data.get("pin"))
+        res = self.recorder.stop()
+        if res is None:
+            raise EditError("Запис не йде.")
+        if res["path"] is None:
+            return {"ok": True, "message": "Пакетів не отримано — порожній запис видалено."}
+        return {"ok": True, "message": f"Збережено {os.path.basename(res['path'])}: пакетів {res['packets']}, "
+                                       f"точок GPS {res['gps']}, тривалість {res['duration']:.0f} с"}
+
+    def post_gps(self, data):
+        """Точки GPS телефона: {"points": [{"lat", "lon", "acc", "age"(мс)}, …]}. Пише їх у запис і показує на мапі."""
+        self._need_recorder(data.get("pin"))
+        points = data.get("points")
+        if not isinstance(points, list) or len(points) > MAX_GPS_POINTS:
+            raise EditError("Неправильний запит.")
+        now = time.monotonic()
+        good = []
+        for p in points:
+            try:
+                lat, lon, age = float(p["lat"]), float(p["lon"]), float(p.get("age") or 0) / 1000
+                acc = None if p.get("acc") is None else float(p["acc"])
+                check_latlon(lat, lon)
+            except (TypeError, KeyError, ValueError, AttributeError):
+                continue                                  # одну зіпсовану точку пропускаємо, решту пишемо
+            if not all(map(math.isfinite, (age, acc or 0.0))) or not 0 <= age <= MAX_GPS_AGE:
+                continue
+            good.append((lat, lon, None if acc is None else max(acc, 0.0), age))
+        if not self.recording:
+            return {"ok": True, "recording": False, "saved": 0}
+        saved = sum(self.recorder.write_gps(*p) for p in good)
+        with self.lock:
+            frame = self.frame()
+            if frame:
+                for lat, lon, acc, age in sorted(good, key=lambda p: -p[3]):   # від старіших до новіших
+                    self._set_phone(*frame.to_local(lat, lon), acc, now - age)
+        return {"ok": True, "recording": self.recording, "saved": saved}
+
 
 # ---------------------------------------------------------------- HTTP
 def make_handler(state):
@@ -237,7 +341,9 @@ def make_handler(state):
 
         def do_POST(self):
             path = self.path.split("?", 1)[0]
-            actions = {"/api/beacons": state.save_beacon, "/api/beacons/delete": state.delete_beacon}
+            actions = {"/api/beacons": state.save_beacon, "/api/beacons/delete": state.delete_beacon,
+                       "/api/record/start": state.record_start, "/api/record/stop": state.record_stop,
+                       "/api/gps": state.post_gps}
             if path not in actions:
                 return self._json(404, {"error": "Не знайдено"})
             try:
