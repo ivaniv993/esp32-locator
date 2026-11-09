@@ -206,7 +206,15 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(self.request(base + "/", context=ctx)[0], 200)    # і після цього працює
 
     def test_addresses(self):
-        self.assertTrue(addresses()[0].endswith(".local"))
+        self.assertTrue(any(a.endswith(".local") for a in addresses()))
+
+    def test_hotspot_address_comes_first(self):
+        from unittest import mock
+        with mock.patch("esp32_locator.web._interface_ips", return_value=["192.168.1.5", "10.42.0.1"]):
+            out = addresses()
+        self.assertEqual(out[0], "10.42.0.1")
+        self.assertTrue(out[1].endswith(".local"))
+        self.assertIn("192.168.1.5", out)
 
 
 if __name__ == "__main__":

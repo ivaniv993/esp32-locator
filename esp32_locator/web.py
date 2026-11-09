@@ -606,15 +606,44 @@ def start_server(state, port, host="0.0.0.0", tls=None):
     return server
 
 
+HOTSPOT_PREFIX = "10.42.0."      # адреса Pi у власній точці доступу (install-raspberry.sh --hotspot)
+
+
+def _interface_ips():
+    """IPv4-адреси всіх мережевих інтерфейсів (Linux). У точці доступу немає маршруту «назовні»,
+    тож адресу не дізнатися через connect() — питаємо самі інтерфейси."""
+    try:
+        import fcntl
+        import struct
+    except ImportError:
+        return []
+    ips = []
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            for _, name in socket.if_nameindex():
+                try:
+                    packed = fcntl.ioctl(s.fileno(), 0x8915, struct.pack("256s", name[:15].encode()))  # SIOCGIFADDR
+                except OSError:
+                    continue                     # інтерфейс без IPv4
+                ips.append(socket.inet_ntoa(packed[20:24]))
+    except OSError:
+        pass
+    return ips
+
+
 def addresses():
-    """Адреси, за якими сторінку можна відкрити з телефона: ім’я.local і IP у мережі (без надсилання пакетів)."""
-    out = [f"{socket.gethostname().split('.')[0]}.local"]
+    """Адреси, за якими сторінку можна відкрити з телефона (без надсилання пакетів).
+    Адреса точки доступу Pi (10.42.0.1) — першою: з телефона, підключеного до Pi, вона відкривається завжди,
+    а ім’я .local частина Android не знаходить."""
+    ips = [ip for ip in _interface_ips() if not ip.startswith("127.")]
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("192.0.2.1", 9))              # лише вибір маршруту; пакет не надсилається
             ip = s.getsockname()[0]
-        if not ip.startswith("127."):
-            out.append(ip)
+        if not ip.startswith("127.") and ip not in ips:
+            ips.append(ip)
     except OSError:
         pass
-    return out
+    hotspot = [ip for ip in ips if ip.startswith(HOTSPOT_PREFIX)]
+    others = [ip for ip in ips if not ip.startswith(HOTSPOT_PREFIX)]
+    return hotspot + [f"{socket.gethostname().split('.')[0]}.local"] + others
