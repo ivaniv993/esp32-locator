@@ -10,7 +10,8 @@
     {"type":"gps","t":1.020,"lat":50.4501234,"lon":30.5234567,"acc":4.0}
     {"type":"est","t":1.200,"heard":3,"x":12.31,"y":8.02,"lat":50.4501301,"lon":30.5234401,"rms":1.2}
 Невідомі типи рядків і поля при читанні пропускаються — формат можна розширювати.
-"radio" і "distance" у маяків з’явились пізніше: у старих записах їх немає.
+"radio" і "distance" у маяків з’явились пізніше: у старих записах їх немає. Так само "rejected" в "est" —
+список маяків, відкинутих як неузгоджені з рештою (є лише тоді, коли такі були).
 Версія 2 — receiver_truth може бути null (версія 1 так не вміла).
 """
 import bisect
@@ -210,6 +211,8 @@ class Recorder:
         if loc.pos and loc.heard >= 3:
             est.update(x=round(loc.pos[0], 2), y=round(loc.pos[1], 2),
                        rms=None if loc.rms is None else round(loc.rms, 2))
+            if loc.rejected:
+                est["rejected"] = sorted(loc.rejected)
             if self._frame:
                 est["lat"], est["lon"] = (round(v, 7) for v in self._frame.to_latlon(*loc.pos))
         w.write_event("est", **est)

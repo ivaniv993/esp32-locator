@@ -233,16 +233,19 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
         # --- кола відстаней, слід, передавачі, положення
         for t, r, d in loc.rows:
             if d is not None:
-                dashed_circle(screen, mix(PAPER, TX, 0.55), P(t["x"], t["y"]), int(d * scale))
+                bad = t["mac"] in loc.rejected
+                dashed_circle(screen, mix(PAPER, WARN if bad else TX, 0.55), P(t["x"], t["y"]), int(d * scale))
         for i, p in enumerate(trail):
             pygame.draw.circle(screen, mix(PAPER, EST, 0.1 + 0.4 * i / len(trail)), P(*p), 3)
         for t, r, d in loc.rows:
             c = P(t["x"], t["y"])
             if t is active:
                 pygame.draw.circle(screen, EST, c, 15, 2)
-            pygame.draw.circle(screen, TX if r is not None else mix(PAPER, TX, 0.35), c, 9)
+            bad = t["mac"] in loc.rejected
+            pygame.draw.circle(screen, WARN if bad else TX if r is not None else mix(PAPER, TX, 0.35), c, 9)
             pygame.draw.circle(screen, PAPER, c, 9, 2)
-            label = f"{t.get('name') or t['mac'][-5:]}  " + (f"{r['rssi']:.0f} дБм" if r else "немає")
+            label = f"{t.get('name') or t['mac'][-5:]}  " + (f"{r['rssi']:.0f} дБм" if r else "немає") \
+                + ("  відкинуто" if bad else "")
             right = c[0] > map_rect.right - 120
             text(screen, label, f_txt, INK, (c[0] + (-14 if right else 14), c[1]),
                  "midright" if right else "midleft")
@@ -324,6 +327,9 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
             else:
                 snr = f"   SNR {fmt(r['snr'], 0)}" if r["snr"] is not None else ""
                 text(screen, f"{r['rssi']:.0f} дБм{snr}   {fmt(d, 1)} м   пак.: {r['n']}", f_small, MUTED, (x, y))
+                if t["mac"] in loc.rejected:
+                    y += 17
+                    text(screen, "відкинуто: не узгоджується з іншими", f_small, WARN, (x, y))
             y += 24
         if editable and cfg["transmitters"]:
             text(screen, "Маяк можна перетягнути на мапі", f_small, MUTED, (x, y - 4)); y += 16

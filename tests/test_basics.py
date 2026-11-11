@@ -5,7 +5,7 @@ import unittest
 from esp32_locator.metrics import bias, percentile, spread, summarize
 from esp32_locator.protocol import norm_mac, parse_line
 from esp32_locator.readings import Readings
-from esp32_locator.solver import distance_from_loss, solve
+from esp32_locator.solver import Locator, distance_from_loss, solve, solve_consistent
 
 from .synthetic import default_cfg
 
@@ -58,6 +58,71 @@ class SolverTest(unittest.TestCase):
         self.assertAlmostEqual(distance_from_loss(40.0, cfg), 1.0)
         self.assertAlmostEqual(distance_from_loss(67.0, cfg), 10.0)
 
+
+SLOPE = 27.0
+CORNERS = [(0, 0), (10, 0), (0, 8), (10, 8), (5, 0)]
+
+
+def exact(truth, beacons):
+    return [(x, y, math.hypot(truth[0] - x, truth[1] - y)) for x, y in beacons]
+
+
+def off_db(pt, db):
+    """Маяк, відстань до якого «бреше» на db дБ втрат (мінус — здається ближчим)."""
+    x, y, d = pt
+    return x, y, d * 10 ** (db / SLOPE)
+
+
+class ConsistencyTest(unittest.TestCase):
+    def test_lying_beacon_is_rejected(self):
+        truth = (3.0, 4.0)
+        for liar in range(len(CORNERS)):
+            for db in (-20.0, 20.0):
+                pts = exact(truth, CORNERS)
+                pts[liar] = off_db(pts[liar], db)
+                x, y, rms, rejected = solve_consistent(pts, SLOPE)
+                self.assertEqual(rejected, [liar], (liar, db))
+                self.assertAlmostEqual(x, truth[0], places=2)
+                self.assertAlmostEqual(y, truth[1], places=2)
+
+    def test_consistent_beacons_are_kept(self):
+        pts = [off_db(p, db) for p, db in zip(exact((7.0, 2.5), CORNERS), (3, -3, 2, -2, 1))]
+        self.assertEqual(solve_consistent(pts, SLOPE)[3], [])
+
+    def test_three_beacons_are_never_reduced(self):
+        pts = exact((3.0, 4.0), CORNERS[:3])
+        pts[0] = off_db(pts[0], -20.0)
+        self.assertEqual(solve_consistent(pts, SLOPE)[3], [])
+        self.assertIsNone(solve_consistent([], SLOPE))
+
+    def test_threshold(self):
+        pts = exact((3.0, 4.0), CORNERS)
+        pts[1] = off_db(pts[1], 10.0)
+        self.assertEqual(solve_consistent(pts, SLOPE, max_db=8.0)[3], [1])
+        self.assertEqual(solve_consistent(pts, SLOPE, max_db=12.0)[3], [])
+
+    def test_locator_marks_rejected_beacon(self):
+        cfg = default_cfg()
+        cfg["transmitters"] = [{"name": str(i), "mac": f"{i:012X}", "x": float(x), "y": float(y)}
+                               for i, (x, y) in enumerate(CORNERS[:4])]
+        truth = (3.0, 4.0)
+        readings = Readings(3.0)
+        for t in cfg["transmitters"]:
+            loss = 40.0 + SLOPE * math.log10(math.hypot(truth[0] - t["x"], truth[1] - t["y"]))
+            txp = 14.0 - 20.0 if t["name"] == "2" else 14.0      # маяк 2 «каже», що він на 20 дБ слабший
+            readings.add(t["mac"], 14.0 - loss, 8.0, txp, ts=0.0)
+        loc = Locator(cfg, readings)
+        loc.update(now=1.0)
+        self.assertEqual(loc.rejected, {"000000000002"})
+        self.assertAlmostEqual(loc.pos[0], truth[0], places=2)
+        self.assertAlmostEqual(loc.pos[1], truth[1], places=2)
+        self.assertEqual(loc.heard, 4)
+
+        cfg["outliers"]["enabled"] = False
+        loc = Locator(cfg, readings)
+        loc.update(now=1.0)
+        self.assertEqual(loc.rejected, set())
+        self.assertGreater(math.hypot(loc.pos[0] - truth[0], loc.pos[1] - truth[1]), 0.5)
 
 class MetricsTest(unittest.TestCase):
     def test_percentile(self):

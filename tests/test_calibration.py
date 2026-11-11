@@ -91,7 +91,7 @@ class WebCalibrationTest(unittest.TestCase):
 
     def loc(self):
         return types.SimpleNamespace(pos=None, rms=None, heard=0, rows=[(t, None, None) for t in self.cfg["transmitters"]],
-                                     unknown=[])
+                                     unknown=[], rejected=set())
 
     def measure(self, mac, d, packets, offset=0.0):
         self.ws.calibration_measure({"pin": "1", "mac": mac, "distance": d})

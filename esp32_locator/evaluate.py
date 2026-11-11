@@ -132,6 +132,9 @@ def params(cfg):
     """Параметри алгоритму, від яких залежить результат."""
     out = {"pl_1m": cfg["signal"]["pl_1m"], "pl_10m": cfg["signal"]["pl_10m"],
            "smoothing": cfg["smoothing"], "window_sec": cfg["window_sec"], "step": STEP}
+    out_cfg = cfg.get("outliers") or {}
+    if out_cfg.get("enabled", True):              # поріг відкидання неузгодженого маяка, дБ
+        out["outliers_db"] = float(out_cfg.get("max_db", 12.0))
     offsets = {t["mac"]: t["pl_offset"] for t in cfg["transmitters"] if t.get("pl_offset")}
     if offsets:                                   # власні зсуви маяків з калібрування
         out["offsets"] = offsets
@@ -181,7 +184,9 @@ def format_report(results, cfg):
     покриття — частка кроків із ≥3 маяками, зсув — систематичне відхилення, розкид — «тремтіння» оцінки."""
     p = params(cfg)
     lines = [f"Параметри: pl_1m={p['pl_1m']} pl_10m={p['pl_10m']} smoothing={p['smoothing']} "
-             f"window={p['window_sec']} с, крок {p['step']} с", "", HEADER, "-" * len(HEADER)]
+             f"window={p['window_sec']} с, відкидання маяків "
+             + (f"> {p['outliers_db']:g} дБ" if "outliers_db" in p else "вимкнено")
+             + f", крок {p['step']} с", "", HEADER, "-" * len(HEADER)]
     lines += [_row(r.name, r.metrics()) for r in results]
     if len(results) > 1:
         lines += ["-" * len(HEADER), _row(f"Разом ({len(results)})", {**total_metrics(results), "duration": sum(r.duration for r in results)}, extra=False)]
