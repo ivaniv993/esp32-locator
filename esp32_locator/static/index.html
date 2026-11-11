@@ -258,10 +258,11 @@ function render() {
   for (const b of S.beacons) {
     const el = $("beacons").querySelector(`[data-info="${CSS.escape(b.mac)}"]`);
     if (!el) continue;
-    el.className = "small " + (b.rssi == null ? "warn" : "muted");
+    el.className = "small " + (b.rssi == null || b.rejected ? "warn" : "muted");
     el.textContent = (b.rssi == null ? "немає сигналу"
       : `${fmt(b.rssi, 0)} дБм${b.snr == null ? "" : ` · SNR ${fmt(b.snr, 0)}`} · ${fmt(b.distance)} м · пак.: ${b.packets}`)
-      + (b.offset ? ` · зсув ${b.offset > 0 ? "+" : ""}${fmt(b.offset)} дБ` : "");
+      + (b.offset ? ` · зсув ${b.offset > 0 ? "+" : ""}${fmt(b.offset)} дБ` : "")
+      + (b.rejected ? " · відкинуто: не узгоджується з іншими" : "");
   }
 
   $("unknownbox").style.display = S.unknown.length ? "" : "none";
@@ -321,8 +322,9 @@ function draw() {
   if (field()) { g.font = "600 13px system-ui, sans-serif"; g.textAlign = "right"; g.fillText("Пн ↑", W - 10, 20); }
 
   const beacons = S.beacons.map(b => drag && drag.mac === b.mac ? { ...b, x: drag.x, y: drag.y } : b);
-  g.setLineDash([5, 5]); g.strokeStyle = C.tx + "88";
+  g.setLineDash([5, 5]);
   for (const b of beacons) if (b.distance != null) {
+    g.strokeStyle = (b.rejected ? C.warn : C.tx) + "88";
     g.beginPath(); g.arc(...P(b.x, b.y), Math.min(b.distance * scale, 4000), 0, 2 * Math.PI); g.stroke();
   }
   g.setLineDash([]);
@@ -334,12 +336,13 @@ function draw() {
   g.font = "600 13px system-ui, sans-serif";
   for (const b of beacons) {
     const [x, y] = P(b.x, b.y);
-    g.fillStyle = b.rssi == null ? C.major : C.tx;
+    g.fillStyle = b.rssi == null ? C.major : b.rejected ? C.warn : C.tx;
     g.beginPath(); g.arc(x, y, 9, 0, 2 * Math.PI); g.fill();
     g.strokeStyle = C.paper; g.lineWidth = 2; g.stroke(); g.lineWidth = 1;
     const right = x > W - 110;
     g.fillStyle = C.ink; g.textAlign = right ? "right" : "left";
-    g.fillText(`${b.name || b.mac.slice(-5)}  ${b.rssi == null ? "немає" : Math.round(b.rssi) + " дБм"}`, x + (right ? -14 : 14), y + 4);
+    g.fillText(`${b.name || b.mac.slice(-5)}  ${b.rssi == null ? "немає" : Math.round(b.rssi) + " дБм"}${b.rejected ? "  відкинуто" : ""}`,
+      x + (right ? -14 : 14), y + 4);
   }
   if (S.truth) {
     const [x, y] = P(S.truth[0], S.truth[1]);

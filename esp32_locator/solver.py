@@ -1,4 +1,5 @@
-"""Алгоритм визначення положення: втрати сигналу → відстані → трилатерація → згладжування."""
+"""Алгоритм визначення положення: втрати сигналу → відстані → трилатерація (з відкиданням
+неузгоджених маяків) → згладжування."""
 import math
 
 
@@ -53,6 +54,42 @@ def solve(pts):
     return x, y, rms
 
 
+def mismatch_db(x, y, pt, slope):
+    """Наскільки маяк pt = (px, py, d) не згоден з положенням (x, y): різниця між відстанню до нього
+    і виміряною, переведена в дБ втрат (slope — дБ на 10-кратне збільшення відстані)."""
+    px, py, d = pt
+    return slope * math.log10(max(math.hypot(x - px, y - py), 0.3) / max(d, 0.3))
+
+
+def solve_consistent(pts, slope, max_db=12.0):
+    """solve() з відкиданням маяків, що не узгоджуються з рештою (перебір «без кожного по черзі»).
+    Для кожного маяка положення рахується без нього; вибирається той, без якого решта узгоджується
+    найкраще. Він відкидається, якщо не згоден з цим положенням більше ніж на max_db. Перебір
+    повторюється, але щонайменше 3 маяки лишаються завжди — тож відкидати можна лише з 4 і більше.
+    Поріг у дБ, а не в метрах, щоб однаково працювати в кімнаті й у полі; ~5 розкидів RSSI дає
+    близько 1–2 % хибних відкидань.
+    Повертає (x, y, rms, rejected) — rejected: індекси відкинутих у pts — або None."""
+    res = solve(pts)
+    if res is None:
+        return None
+    keep, rejected = list(range(len(pts))), []
+    while len(keep) >= 4:
+        best = None
+        for i in keep:
+            rest = [pts[j] for j in keep if j != i]
+            sub = solve(rest)
+            spread = math.sqrt(sum(mismatch_db(sub[0], sub[1], p, slope) ** 2 for p in rest) / len(rest))
+            if best is None or spread < best[0]:
+                best = (spread, i, sub)
+        _, i, sub = best
+        if abs(mismatch_db(sub[0], sub[1], pts[i], slope)) <= max_db:
+            break
+        keep.remove(i)
+        rejected.append(i)
+        res = sub
+    return (*res, rejected)
+
+
 class Locator:
     """Об’єднує виміри, розв’язок і згладжування."""
 
@@ -61,18 +98,20 @@ class Locator:
         self.pos = None      # згладжене положення (x, y)
         self.rms = None
         self.rows = []       # стан кожного передавача для екрана
+        self.rejected = set()  # маяки (mac), відкинуті як неузгоджені з рештою
         self.unknown = []
         self.heard = 0
 
     def update(self, now=None):
         snap = self.readings.snapshot(now)
         known = {t["mac"] for t in self.cfg["transmitters"]}
-        pts, rows = [], []
+        pts, used, rows = [], [], []
         for t in self.cfg["transmitters"]:
             r = snap.get(t["mac"])
             if r:
                 d = distance_from_loss(r["pl"], self.cfg, t.get("pl_offset", 0.0))
                 pts.append((t["x"], t["y"], d))
+                used.append(t["mac"])
                 rows.append((t, r, d))
             else:
                 rows.append((t, None, None))
@@ -80,11 +119,18 @@ class Locator:
         self.unknown = sorted(                     # незареєстровані — без власного зсуву калібрування
             ((m, r, distance_from_loss(r["pl"], self.cfg)) for m, r in snap.items() if m not in known),
             key=lambda u: -u[1]["rssi"])
-        res = solve(pts)
+        out = self.cfg.get("outliers") or {}
+        if out.get("enabled", True):
+            sig = self.cfg["signal"]
+            res = solve_consistent(pts, max(1.0, sig["pl_10m"] - sig["pl_1m"]), float(out.get("max_db", 12.0)))
+        else:
+            res = solve(pts)
+            res = res and (*res, [])
         if res is None:
-            self.pos, self.rms = None, None
+            self.pos, self.rms, self.rejected = None, None, set()
             return
-        x, y, self.rms = res
+        x, y, self.rms, rejected = res
+        self.rejected = {used[i] for i in rejected}
         a = float(self.cfg["smoothing"])
         if self.pos is None:
             self.pos = (x, y)

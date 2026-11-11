@@ -26,7 +26,7 @@ def write_cfg(path, **cfg):
 
 def fake_loc(cfg, pos=(3.0, 4.0), heard=3, rms=0.4):
     rows = [(t, {"rssi": -60.0, "snr": 7.5, "n": 6, "pl": 74.0}, 5.0) for t in cfg["transmitters"]]
-    return types.SimpleNamespace(pos=pos, rms=rms, heard=heard, rows=rows,
+    return types.SimpleNamespace(pos=pos, rms=rms, heard=heard, rows=rows, rejected=set(),
                                  unknown=[("DDDDDDDDDDDD", {"rssi": -70.0}, 9.0)])
 
 

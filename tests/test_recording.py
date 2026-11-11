@@ -105,7 +105,7 @@ class RecorderTest(unittest.TestCase):
 
     def loc(self, pos=(10.0, 12.0)):
         rows = [(t, None, None) for t in self.cfg["transmitters"]]
-        return types.SimpleNamespace(pos=pos, rms=0.5, heard=3, rows=rows, unknown=[])
+        return types.SimpleNamespace(pos=pos, rms=0.5, heard=3, rows=rows, unknown=[], rejected=set())
 
     def test_record_from_page_with_phone_gps(self):
         with self.assertRaises(PermissionError):

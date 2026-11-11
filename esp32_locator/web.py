@@ -181,7 +181,8 @@ class WebState:
                              "rssi": round(r["rssi"], 1) if r else None,
                              "loss": round(r["pl"], 1) if r else None, "offset": t.get("pl_offset", 0.0),
                              "snr": round(r["snr"], 1) if r and r["snr"] is not None else None,
-                             "packets": r["n"] if r else 0, "distance": None if d is None else round(d, 2)}
+                             "packets": r["n"] if r else 0, "distance": None if d is None else round(d, 2),
+                             "rejected": t["mac"] in loc.rejected}
                             for t, r, d in loc.rows],
                 "unknown": [{"mac": m, "rssi": round(r["rssi"], 1), "distance": round(d, 2)} for m, r, d in loc.unknown],
                 "receiver": receiver,

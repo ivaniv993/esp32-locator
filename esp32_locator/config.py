@@ -38,6 +38,9 @@ DEFAULT_CONFIG = {
                                                    # тому значення лише записується в сесії для опису
     "window_sec": 3.0,                             # маяк шле 2 пакети/с — беремо медіану за 3 с
     "smoothing": 0.35,
+    # відкидання маяка, що не узгоджується з рештою (працює з 4 маяків): поріг розбіжності, дБ.
+    # Часто відкидаються справні маяки — збільште; підроблений чи затінений маяк не ловиться — зменште
+    "outliers": {"enabled": True, "max_db": 12.0},
     "fullscreen": False,
     "recordings_dir": "auto",                      # куди --record пише сесії (auto — recordings/ у репо)
     # передача положення в ArduPilot (--mavlink ПОРТ, лише бойовий режим): швидкість порту, стала висота
@@ -61,6 +64,7 @@ def load_config(path):
     merged["radio"] = {**DEFAULT_CONFIG["radio"], **cfg.get("radio", {})}
     merged["mavlink"] = {**DEFAULT_CONFIG["mavlink"], **cfg.get("mavlink", {})}
     merged["web"] = {**DEFAULT_CONFIG["web"], **cfg.get("web", {})}
+    merged["outliers"] = {**DEFAULT_CONFIG["outliers"], **cfg.get("outliers", {})}
     if "pl_1m" not in merged["signal"]:
         # старий формат (сила 0–1000) — переходимо на модель в децибелах
         merged["signal"] = dict(DEFAULT_CONFIG["signal"])
