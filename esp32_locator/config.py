@@ -154,6 +154,12 @@ def apply_field(cfg):
         t["x"], t["y"] = round(x, 2), round(y, 2)
 
 
+def next_name(transmitters):
+    """Перша вільна літера A…Z для нового маяка (після видалення — та, що звільнилась), далі — номер."""
+    used = {t.get("name") for t in transmitters}
+    return next((chr(c) for c in range(65, 91) if chr(c) not in used), str(len(transmitters) + 1))
+
+
 def field_spread_warning(cfg):
     """Попередження, якщо маяки бойового режиму розкидані підозріло широко (переплутано широту й довготу?)."""
     a = cfg["area"]

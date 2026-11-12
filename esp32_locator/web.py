@@ -29,7 +29,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import calibration
-from .config import DEFAULT_CONFIG, apply_field, field_spread_warning, save_config
+from .config import DEFAULT_CONFIG, apply_field, field_spread_warning, next_name, save_config
 from .geo import check_latlon, frame_from_config
 from .packetlog import PacketFeed, format_row
 from .protocol import norm_mac
@@ -70,11 +70,6 @@ def system_poweroff(check=False):
         return subprocess.run(cmd, capture_output=True, timeout=10).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
-
-
-def next_name(transmitters):
-    used = {t.get("name") for t in transmitters}
-    return next((chr(c) for c in range(65, 91) if chr(c) not in used), str(len(transmitters) + 1))
 
 
 class WebState:

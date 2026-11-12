@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-from .config import CONFIG_PATH, MODES, field_spread_warning, load_config, save_config
+from .config import CONFIG_PATH, MODES, field_spread_warning, load_config, next_name, save_config
 from .evaluate import (collect_paths, compare, evaluate_files, format_report, load_baseline,
                        save_baseline)
 from .geo import format_latlon, frame_from_config, parse_latlon
@@ -42,7 +42,7 @@ def add_beacon(cfg, mac, name=None, **coords):
             tx["name"] = name
         print(f"Оновлено {mac} -> ({shown})")
     else:
-        cfg["transmitters"].append({"name": name or chr(65 + len(cfg["transmitters"])), "mac": mac, **coords})
+        cfg["transmitters"].append({"name": name or next_name(cfg["transmitters"]), "mac": mac, **coords})
         print(f"Зареєстровано {mac} -> ({shown})")
     if "x" in coords:
         aw, ah = cfg["area"]["width"], cfg["area"]["height"]

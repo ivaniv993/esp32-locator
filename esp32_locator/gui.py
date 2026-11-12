@@ -3,7 +3,7 @@ import math
 import time
 from collections import deque
 
-from .config import save_config
+from .config import next_name, save_config
 from .mapedit import beacon_at, remove_beacon, screen_to_world
 from .geo import frame_from_config
 from .packetlog import PacketFeed, format_row
@@ -140,9 +140,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
                     wy = (geo["oy"] - e.pos[1]) / geo["scale"]
                     if 0 <= wx <= geo["aw"] and 0 <= wy <= geo["ah"]:
                         wx, wy = round(wx, 1), round(wy, 1)
-                        used = {t.get("name") for t in cfg["transmitters"]}
-                        name = next((chr(c) for c in range(65, 91) if chr(c) not in used),
-                                    str(len(cfg["transmitters"]) + 1))
+                        name = next_name(cfg["transmitters"])
                         cfg["transmitters"].append({"name": name, "mac": selected, "x": wx, "y": wy})
                         save_config(cfg_path, cfg)
                         msg, msg_t = f"Зареєстровано {name}: {selected}  ({fmt(wx, 1)}; {fmt(wy, 1)} м)", time.monotonic()
