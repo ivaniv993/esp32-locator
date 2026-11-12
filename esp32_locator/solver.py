@@ -90,12 +90,17 @@ def solve_consistent(pts, slope, max_db=12.0):
     return (*res, rejected)
 
 
+MIN_BEACONS = 3       # менше маяків — положення не визначається
+
+
 class Locator:
-    """Об’єднує виміри, розв’язок і згладжування."""
+    """Об’єднує виміри, розв’язок і згладжування.
+    Положення рахується, лише коли чути щонайменше MIN_BEACONS маяків; інакше pos = None.
+    Після такої перерви перше положення береться як є, без згладжування від старої точки."""
 
     def __init__(self, cfg, readings):
         self.cfg, self.readings = cfg, readings
-        self.pos = None      # згладжене положення (x, y)
+        self.pos = None      # згладжене положення (x, y); None — чути менше MIN_BEACONS маяків
         self.rms = None
         self.rows = []       # стан кожного передавача для екрана
         self.rejected = set()  # маяки (mac), відкинуті як неузгоджені з рештою
@@ -119,6 +124,9 @@ class Locator:
         self.unknown = sorted(                     # незареєстровані — без власного зсуву калібрування
             ((m, r, distance_from_loss(r["pl"], self.cfg)) for m, r in snap.items() if m not in known),
             key=lambda u: -u[1]["rssi"])
+        if len(pts) < MIN_BEACONS:                 # з 1–2 маяків положення не визначити — і не вгадуємо
+            self.pos, self.rms, self.rejected = None, None, set()
+            return
         out = self.cfg.get("outliers") or {}
         if out.get("enabled", True):
             sig = self.cfg["signal"]

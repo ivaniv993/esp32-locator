@@ -124,6 +124,53 @@ class ConsistencyTest(unittest.TestCase):
         self.assertEqual(loc.rejected, set())
         self.assertGreater(math.hypot(loc.pos[0] - truth[0], loc.pos[1] - truth[1]), 0.5)
 
+class LocatorMinBeaconsTest(unittest.TestCase):
+    """Менше 3 маяків — положення невідоме; після перерви — без згладжування від старої точки."""
+    BEACONS = [(0.0, 0.0), (60.0, 0.0), (30.0, 60.0)]
+
+    def setUp(self):
+        self.cfg = default_cfg()
+        self.cfg["area"] = {"width": 60, "height": 60}
+        self.cfg["transmitters"] = [{"name": str(i), "mac": f"{i + 1:012X}", "x": x, "y": y}
+                                    for i, (x, y) in enumerate(self.BEACONS)]
+        self.readings = Readings(3.0)
+        self.loc = Locator(self.cfg, self.readings)
+
+    def feed(self, truth, t, macs=None):
+        for b in self.cfg["transmitters"]:
+            if macs is None or b["mac"] in macs:
+                loss = 40.0 + SLOPE * math.log10(math.hypot(truth[0] - b["x"], truth[1] - b["y"]))
+                self.readings.add(b["mac"], 14.0 - loss, 8.0, 14.0, ts=t)
+
+    def test_fewer_than_three_beacons_give_no_position(self):
+        for macs in ({"000000000001"}, {"000000000001", "000000000002"}):
+            readings = Readings(3.0)
+            loc = Locator(self.cfg, readings)
+            self.readings = readings
+            self.feed((30.0, 25.0), 0.0, macs)
+            loc.update(now=0.5)
+            self.assertEqual(loc.heard, len(macs))
+            self.assertIsNone(loc.pos)
+            self.assertIsNone(loc.rms)
+
+    def test_after_dropout_first_position_is_not_smoothed(self):
+        a, b = (30.0, 25.0), (45.0, 15.0)
+        for k in range(10):                       # стоїть у точці a — положення встановилось
+            self.feed(a, k * 0.5)
+            self.loc.update(now=k * 0.5)
+        self.assertAlmostEqual(self.loc.pos[0], a[0], places=2)
+        for k in range(10, 20):                   # 5 с чути лише один маяк; приймач переносять у b
+            self.feed(b, k * 0.5, {"000000000001"})
+            self.loc.update(now=k * 0.5)
+        self.assertEqual(self.loc.heard, 1)
+        self.assertIsNone(self.loc.pos)
+        self.feed(b, 10.0)                        # знову чути всі три
+        self.loc.update(now=10.0)
+        self.assertEqual(self.loc.heard, 3)
+        self.assertAlmostEqual(self.loc.pos[0], b[0], places=1)   # одразу b, а не точка між a і b
+        self.assertAlmostEqual(self.loc.pos[1], b[1], places=1)
+
+
 class MetricsTest(unittest.TestCase):
     def test_percentile(self):
         self.assertEqual(percentile([1, 2, 3, 4, 5], 50), 3)
