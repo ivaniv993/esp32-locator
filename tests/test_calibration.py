@@ -158,6 +158,9 @@ class WebCalibrationTest(unittest.TestCase):
         viewer = WebState(self.cfg, None, self.readings, types.SimpleNamespace(status="ok"))
         with self.assertRaises(EditError):
             viewer.calibration_measure({"mac": "A" * 12, "distance": 1})
+        for action in (viewer.calibration_cancel, viewer.calibration_delete, viewer.calibration_reset):
+            with self.assertRaises(EditError, msg=action.__name__):
+                action({"index": 0})
 
 
 if __name__ == "__main__":

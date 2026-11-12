@@ -80,7 +80,11 @@ def load_config(path):
     else:                                          # бракує pl_1m чи pl_10m — значення за замовчуванням
         merged["signal"] = {**DEFAULT_CONFIG["signal"], **(signal or {})}
     check_algorithm(merged)
-    for t in merged["transmitters"]:
+    if not isinstance(merged["transmitters"], list):
+        raise ValueError("transmitters має бути списком маяків")
+    for i, t in enumerate(merged["transmitters"], 1):
+        if not isinstance(t, dict) or not t.get("mac"):
+            raise ValueError(f"маяк №{i} у transmitters: немає ID маяка (\"mac\": \"A1B2C3D4E5F6\")")
         t["mac"] = norm_mac(t["mac"]) or t["mac"]
         if "pl_offset" in t:
             try:

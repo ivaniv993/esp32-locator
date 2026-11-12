@@ -366,6 +366,8 @@ class WebState:
         return {"ok": True, "message": f"Вимірюю {t.get('name') or mac} на {d:g} м, {sec:g} с — не рухайте приймач."}
 
     def calibration_cancel(self, data):
+        if not self.editable:
+            raise EditError("Калібрування — лише у звичайному режимі.")
         self._auth(data.get("pin"))
         with self.lock:
             self.cal_job = None

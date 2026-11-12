@@ -49,6 +49,13 @@ class AlgorithmConfigTest(unittest.TestCase):
                 self.load(cfg)
             self.assertIn(hint, str(ctx.exception), cfg)
 
+    def test_beacon_without_id_is_explained(self):
+        for txs in ([{"name": "A", "x": 1, "y": 1}], [{"name": "A", "mac": "", "x": 1, "y": 1}], ["A1B2C3D4E5F6"],
+                    {"mac": "A1B2C3D4E5F6"}):
+            with self.assertRaises(ValueError, msg=txs) as ctx:
+                self.load({"transmitters": txs})
+            self.assertIn("transmitters", str(ctx.exception))
+
     def test_not_an_object(self):
         with self.assertRaises(ValueError):
             self.load([1, 2])
