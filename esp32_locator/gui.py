@@ -3,7 +3,7 @@ import math
 import time
 from collections import deque
 
-from .config import save_config
+from .config import next_name, save_config
 from .mapedit import beacon_at, remove_beacon, screen_to_world
 from .geo import frame_from_config
 from .packetlog import PacketFeed, format_row
@@ -23,6 +23,23 @@ TRUTH = (124, 222, 134)
 
 def fmt(v, n=2):
     return f"{v:.{n}f}".replace(".", ",")
+
+
+def fmt_err(err):
+    """'±2,3 м' або 'дуже велика' (маяки положення в якомусь напрямку не визначають)."""
+    return f"±{fmt(err, 1)} м" if math.isfinite(err) else "дуже велика"
+
+
+def wrap(s, n=46):
+    """Розбиває довгий текст на рядки для вузької панелі."""
+    lines, cur = [], ""
+    for w in s.split():
+        if cur and len(cur) + 1 + len(w) > n:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = f"{cur} {w}" if cur else w
+    return lines + ([cur] if cur else [])
 
 
 def mix(c1, c2, t):
@@ -140,9 +157,7 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
                     wy = (geo["oy"] - e.pos[1]) / geo["scale"]
                     if 0 <= wx <= geo["aw"] and 0 <= wy <= geo["ah"]:
                         wx, wy = round(wx, 1), round(wy, 1)
-                        used = {t.get("name") for t in cfg["transmitters"]}
-                        name = next((chr(c) for c in range(65, 91) if chr(c) not in used),
-                                    str(len(cfg["transmitters"]) + 1))
+                        name = next_name(cfg["transmitters"])
                         cfg["transmitters"].append({"name": name, "mac": selected, "x": wx, "y": wy})
                         save_config(cfg_path, cfg)
                         msg, msg_t = f"Зареєстровано {name}: {selected}  ({fmt(wx, 1)}; {fmt(wy, 1)} м)", time.monotonic()
@@ -173,6 +188,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
         if now - last_calc >= 0.2:
             last_calc = now
             loc.update()
+            if loc.moved:                    # маяк перенесли (тут, на сторінці чи через API)
+                trail.clear()
             if on_update:
                 on_update(loc)
             if loc.pos:
@@ -249,8 +266,14 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
             right = c[0] > map_rect.right - 120
             text(screen, label, f_txt, INK, (c[0] + (-14 if right else 14), c[1]),
                  "midright" if right else "midleft")
+        if loc.alt:   # другий розв’язок, що пояснює виміри так само добре (маяки майже на одній лінії)
+            c = P(min(aw, max(0.0, loc.alt[0])), min(ah, max(0.0, loc.alt[1])))
+            dashed_circle(screen, WARN, c, 12, dash=5)
+            text(screen, "?", f_mid, WARN, c, "center")
         if loc.pos:   # маркер не виходить за межі мапи, точні числа — на панелі
             c = P(min(aw, max(0.0, loc.pos[0])), min(ah, max(0.0, loc.pos[1])))
+            if loc.err is not None and math.isfinite(loc.err) and loc.err * scale > 16:
+                dashed_circle(screen, mix(PAPER, EST, 0.6), c, int(loc.err * scale))   # оцінка похибки
             pygame.draw.circle(screen, EST, c, 14, 3)
             pygame.draw.line(screen, EST, (c[0] - 20, c[1]), (c[0] + 20, c[1]), 2)
             pygame.draw.line(screen, EST, (c[0], c[1] - 20), (c[0], c[1] + 20), 2)
@@ -305,11 +328,16 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
             else:
                 text(screen, f"x = {fmt(loc.pos[0])} м", f_big, EST, (x, y)); y += 32
                 text(screen, f"y = {fmt(loc.pos[1])} м", f_big, EST, (x, y)); y += 34
-            text(screen, f"Узгодженість вимірів: ±{fmt(loc.rms, 1)} м", f_small, MUTED, (x, y)); y += 22
+            text(screen, f"Оцінка похибки: {fmt_err(loc.err)}", f_small, WARN if loc.warnings else MUTED, (x, y))
+            y += 22
             if now_truth:
                 err = math.hypot(loc.pos[0] - now_truth[0], loc.pos[1] - now_truth[1])
                 where = "" if geo_frame else f"  (справжнє {fmt(now_truth[0], 1)}; {fmt(now_truth[1], 1)})"
-                text(screen, f"Похибка: {fmt(err, 2)} м{where}", f_small, TRUTH, (x, y)); y += 22
+                text(screen, f"Справжня похибка: {fmt(err, 2)} м{where}", f_small, TRUTH, (x, y)); y += 22
+            for w in loc.warnings:
+                for line in wrap(w, max(24, (panel.w - 36) // 7)):
+                    text(screen, line, f_small, WARN, (x, y)); y += 17
+                y += 5
         else:
             text(screen, "невідоме", f_big, MUTED, (x, y)); y += 40
         if loc.heard < 3:

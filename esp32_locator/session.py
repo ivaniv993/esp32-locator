@@ -8,10 +8,11 @@
 Запис з веб-сторінки (приймач носять): "receiver_truth": null, а фактичне положення — трек GPS
 телефона; що визначила програма — раз на секунду:
     {"type":"gps","t":1.020,"lat":50.4501234,"lon":30.5234567,"acc":4.0}
-    {"type":"est","t":1.200,"heard":3,"x":12.31,"y":8.02,"lat":50.4501301,"lon":30.5234401,"rms":1.2}
+    {"type":"est","t":1.200,"heard":3,"x":12.31,"y":8.02,"lat":50.4501301,"lon":30.5234401,"rms":1.2,"err":2.4}
 Невідомі типи рядків і поля при читанні пропускаються — формат можна розширювати.
 "radio" і "distance" у маяків з’явились пізніше: у старих записах їх немає. Так само "rejected" в "est" —
-список маяків, відкинутих як неузгоджені з рештою (є лише тоді, коли такі були).
+список маяків, відкинутих як неузгоджені з рештою (є лише тоді, коли такі були); "err" — оцінка похибки, м
+(null — дуже велика); "alt" — друга можлива точка [x, y], якщо маяки майже на одній лінії.
 Версія 2 — receiver_truth може бути null (версія 1 так не вміла).
 """
 import bisect
@@ -209,8 +210,12 @@ class Recorder:
         self._est_at = now
         est = {"heard": loc.heard}
         if loc.pos and loc.heard >= 3:
+            err = getattr(loc, "err", None)
             est.update(x=round(loc.pos[0], 2), y=round(loc.pos[1], 2),
-                       rms=None if loc.rms is None else round(loc.rms, 2))
+                       rms=None if loc.rms is None else round(loc.rms, 2),
+                       err=round(err, 2) if err is not None and math.isfinite(err) else None)
+            if getattr(loc, "alt", None) is not None:
+                est["alt"] = [round(loc.alt[0], 2), round(loc.alt[1], 2)]
             if loc.rejected:
                 est["rejected"] = sorted(loc.rejected)
             if self._frame:

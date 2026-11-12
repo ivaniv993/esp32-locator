@@ -29,7 +29,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import calibration
-from .config import DEFAULT_CONFIG, apply_field, field_spread_warning, save_config
+from .config import DEFAULT_CONFIG, apply_field, field_spread_warning, next_name, save_config
 from .geo import check_latlon, frame_from_config
 from .packetlog import PacketFeed, format_row
 from .protocol import norm_mac
@@ -72,11 +72,6 @@ def system_poweroff(check=False):
         return False
 
 
-def next_name(transmitters):
-    used = {t.get("name") for t in transmitters}
-    return next((chr(c) for c in range(65, 91) if chr(c) not in used), str(len(transmitters) + 1))
-
-
 class WebState:
     """Стан для сторінки й зміни маяків. cfg — той самий об’єкт, з яким працюють Locator і екран."""
 
@@ -101,7 +96,6 @@ class WebState:
         self._json = b"{}"
         self._geo_src = object()
         self._frame = None
-        self._reset_locator = False
         self._rate = (time.monotonic(), readings.total, 0.0)
 
     @property
@@ -136,9 +130,8 @@ class WebState:
     def on_update(self, loc):
         """Викликається після кожного Locator.update(); готує JSON для GET /api/state."""
         with self.lock:
-            if self._reset_locator:                       # координати маяків змінились — старе згладжене
-                loc.pos, self._reset_locator = None, False  # положення в іншій сітці
-                self.trail.clear()
+            if getattr(loc, "moved", False):              # координати маяків змінились — Locator почав
+                self.trail.clear()                        # згладжування заново, старий слід — в іншій сітці
             self.feed.update(self.cfg["transmitters"])
             self._cal_tick()
             frame = self.frame()
@@ -168,8 +161,14 @@ class WebState:
 
             receiver = None
             if loc.pos:
+                err, alt = getattr(loc, "err", None), getattr(loc, "alt", None)
                 receiver = {"x": round(loc.pos[0], 2), "y": round(loc.pos[1], 2), "latlon": latlon(*loc.pos),
-                            "rms": None if loc.rms is None else round(loc.rms, 2), "fix": fix}
+                            "rms": None if loc.rms is None else round(loc.rms, 2), "fix": fix,
+                            # оцінка похибки, м; null при fix — маяки положення в якомусь напрямку не визначають
+                            "err": round(err, 2) if err is not None and math.isfinite(err) else None,
+                            "alt": None if alt is None else {"x": round(alt[0], 2), "y": round(alt[1], 2),
+                                                             "latlon": latlon(*alt)},
+                            "warnings": list(getattr(loc, "warnings", []))}
             state = {
                 "mode": self.cfg.get("mode", "local"),
                 "area": self.cfg["area"],
@@ -228,13 +227,10 @@ class WebState:
                     apply_field(trial)
                 except ValueError as e:
                     raise EditError(str(e)) from None
-            moved = self.field and trial.get("geo") != self.cfg.get("geo")
             self.cfg["transmitters"] = trial["transmitters"]
             if self.field:
                 self.cfg["area"], self.cfg["geo"] = trial["area"], trial["geo"]
             save_config(self.cfg_path, self.cfg)
-            if moved:
-                self._reset_locator = True
             warning = field_spread_warning(self.cfg) if self.field else None
             return {"ok": True, "message": message, "warning": warning}
 
@@ -376,6 +372,8 @@ class WebState:
         return {"ok": True, "message": f"Вимірюю {t.get('name') or mac} на {d:g} м, {sec:g} с — не рухайте приймач."}
 
     def calibration_cancel(self, data):
+        if not self.editable:
+            raise EditError("Калібрування — лише у звичайному режимі.")
         self._auth(data.get("pin"))
         with self.lock:
             self.cal_job = None

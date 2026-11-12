@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-from .config import CONFIG_PATH, MODES, field_spread_warning, load_config, save_config
+from .config import CONFIG_PATH, MODES, field_spread_warning, load_config, next_name, save_config
 from .evaluate import (collect_paths, compare, evaluate_files, format_report, load_baseline,
                        save_baseline)
 from .geo import format_latlon, frame_from_config, parse_latlon
@@ -42,7 +42,7 @@ def add_beacon(cfg, mac, name=None, **coords):
             tx["name"] = name
         print(f"Оновлено {mac} -> ({shown})")
     else:
-        cfg["transmitters"].append({"name": name or chr(65 + len(cfg["transmitters"])), "mac": mac, **coords})
+        cfg["transmitters"].append({"name": name or next_name(cfg["transmitters"]), "mac": mac, **coords})
         print(f"Зареєстровано {mac} -> ({shown})")
     if "x" in coords:
         aw, ah = cfg["area"]["width"], cfg["area"]["height"]
@@ -155,6 +155,9 @@ def run_headless(cfg, readings, source, on_update=None, link=None, extra=None, e
         last = now
         if loc.pos and loc.heard >= 3:
             where = format_latlon(*frame.to_latlon(*loc.pos)) if frame else f"x={loc.pos[0]:.2f} y={loc.pos[1]:.2f} м"
+            where += f" ±{loc.err:.1f} м" if loc.err is not None and loc.err != float("inf") else " (похибка дуже велика)"
+            if loc.alt is not None:
+                where += "  УВАГА: маяки майже на одній лінії, можливе дзеркальне положення"
         else:
             where = f"положення невідоме (чути маяків: {loc.heard})"
         print("  ".join([f"[{source.status}]", where] + ([link.status] if link else []) + ([extra()] if extra else [])))

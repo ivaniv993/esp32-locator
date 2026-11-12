@@ -1,5 +1,6 @@
 """Веб-сторінка: стан для браузера, зміни маяків, HTTP і HTTPS."""
 import json
+import math
 import os
 import shutil
 import socket
@@ -24,9 +25,10 @@ def write_cfg(path, **cfg):
     return load_config(path)
 
 
-def fake_loc(cfg, pos=(3.0, 4.0), heard=3, rms=0.4):
+def fake_loc(cfg, pos=(3.0, 4.0), heard=3, rms=0.4, err=1.25, alt=None, warnings=()):
     rows = [(t, {"rssi": -60.0, "snr": 7.5, "n": 6, "pl": 74.0}, 5.0) for t in cfg["transmitters"]]
     return types.SimpleNamespace(pos=pos, rms=rms, heard=heard, rows=rows, rejected=set(),
+                                 err=err, alt=alt, warnings=list(warnings),
                                  unknown=[("DDDDDDDDDDDD", {"rssi": -70.0}, 9.0)])
 
 
@@ -53,6 +55,13 @@ class WebStateTest(unittest.TestCase):
     def state(self, ws):
         return json.loads(ws.state_json())
 
+    def test_state_reports_error_estimate_and_mirror_point(self):
+        cfg, ws = self.local()
+        ws.on_update(fake_loc(cfg, err=math.inf, alt=(3.0, -4.0), warnings=["на одній лінії"]))
+        rc = self.state(ws)["receiver"]                            # inf у JSON не буває — null
+        self.assertEqual((rc["err"], rc["alt"], rc["warnings"]),
+                         (None, {"x": 3.0, "y": -4.0, "latlon": None}, ["на одній лінії"]))
+
     def test_state_in_local_mode(self):
         cfg, ws = self.local()
         self.assertEqual(self.state(ws), {})                       # до першого перерахунку
@@ -60,7 +69,8 @@ class WebStateTest(unittest.TestCase):
         ws.on_update(fake_loc(cfg))
         s = self.state(ws)
         self.assertEqual((s["mode"], s["editable"], s["pin_required"], s["heard"]), ("local", True, False, 3))
-        self.assertEqual(s["receiver"], {"x": 3.0, "y": 4.0, "latlon": None, "rms": 0.4, "fix": True})
+        self.assertEqual(s["receiver"], {"x": 3.0, "y": 4.0, "latlon": None, "rms": 0.4, "fix": True,
+                                         "err": 1.25, "alt": None, "warnings": []})
         self.assertEqual([b["name"] for b in s["beacons"]], ["A", "B"])
         self.assertIsNone(s["beacons"][0]["latlon"])
         self.assertEqual(s["unknown"][0]["mac"], "DDDDDDDDDDDD")
@@ -103,7 +113,7 @@ class WebStateTest(unittest.TestCase):
         with self.assertRaises(EditError):
             ws.delete_beacon({"mac": "B" * 12})
 
-    def test_field_edit_recomputes_grid_and_resets_position(self):
+    def test_field_edit_recomputes_grid_and_clears_trail(self):
         cfg, ws = self.field()
         lat, lon = KYIV.to_latlon(80, 0)                           # новий маяк на схід: мапа ширшає,
         res = ws.save_beacon({"mac": "E" * 12, "lat": lat, "lon": lon})   # а кут (0, 0) лишається на місці
@@ -112,7 +122,8 @@ class WebStateTest(unittest.TestCase):
         self.assertEqual(cfg["area"]["width"], 100)               # 80 м + по 10 м відступу
         loc = fake_loc(cfg)
         ws.on_update(loc)
-        self.assertEqual(loc.pos, (3.0, 4.0))                      # сітка не зсунулась — положення не скидається
+        ws.on_update(loc)
+        self.assertEqual(len(ws.trail), 2)
         with open(self.path, encoding="utf-8") as f:
             raw = json.load(f)
         self.assertEqual(set(raw["transmitters"][-1]), {"name", "mac", "lat", "lon"})
@@ -120,8 +131,9 @@ class WebStateTest(unittest.TestCase):
         lat, lon = KYIV.to_latlon(-20, -5)                         # маяк на південний захід: кут (0, 0) зсувається
         ws.save_beacon({"mac": "0" * 12, "lat": lat, "lon": lon})
         self.assertEqual(cfg["area"], {"width": 120, "height": 50})
+        loc.moved = True                                           # Locator помітив нові координати маяків
         ws.on_update(loc)
-        self.assertIsNone(loc.pos)                                 # старе згладжене положення — в іншій сітці
+        self.assertEqual(list(ws.trail), [(3.0, 4.0)])             # старий слід — в іншій сітці
         with self.assertRaises(EditError) as ctx:
             ws.save_beacon({"mac": "E" * 12, "lat": 95, "lon": 30})
         self.assertIn("поза межами", str(ctx.exception))

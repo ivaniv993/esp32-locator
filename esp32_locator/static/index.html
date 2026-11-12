@@ -222,9 +222,9 @@ function render() {
     $("pos").innerHTML = field() && rc.latlon
       ? `${rc.latlon[0].toFixed(6)}<br>${rc.latlon[1].toFixed(6)}`
       : `x = ${fmt(rc.x, 2)} м<br>y = ${fmt(rc.y, 2)} м`;
-    let info = `Узгодженість вимірів ±${fmt(rc.rms)} м · чути маяків: ${S.heard}`;
-    if (S.truth) info += ` · похибка ${fmt(Math.hypot(rc.x - S.truth[0], rc.y - S.truth[1]), 2)} м`;
-    $("posinfo").innerHTML = esc(info);
+    let info = `Оцінка похибки ${rc.err == null ? "дуже велика" : "±" + fmt(rc.err) + " м"} · чути маяків: ${S.heard}`;
+    if (S.truth) info += ` · справжня похибка ${fmt(Math.hypot(rc.x - S.truth[0], rc.y - S.truth[1]), 2)} м`;
+    $("posinfo").innerHTML = esc(info) + (rc.warnings || []).map(w => `<div class="warn">${esc(w)}</div>`).join("");
   } else {
     $("pos").className = "big muted"; $("pos").textContent = "невідоме";
     $("posinfo").innerHTML = `<span class="warn">Чути маяків: ${S.heard} з ${S.beacons.length}. Потрібно щонайменше 3.</span>`;
@@ -368,8 +368,18 @@ function draw() {
     g.globalAlpha = 1;
   }
   const rc = S.receiver;
+  if (rc && rc.fix && rc.alt) {                   // другий розв’язок: маяки майже на одній лінії
+    const [x, y] = P(Math.min(aw, Math.max(0, rc.alt.x)), Math.min(ah, Math.max(0, rc.alt.y)));
+    g.strokeStyle = C.warn; g.fillStyle = C.warn; g.lineWidth = 2; g.setLineDash([4, 4]);
+    g.beginPath(); g.arc(x, y, 12, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]); g.lineWidth = 1;
+    g.font = "700 15px system-ui, sans-serif"; g.textAlign = "center"; g.fillText("?", x, y + 5);
+  }
   if (rc && rc.fix) {
     const [x, y] = P(Math.min(aw, Math.max(0, rc.x)), Math.min(ah, Math.max(0, rc.y)));
+    if (rc.err != null && rc.err * scale > 16) {  // оцінка похибки
+      g.strokeStyle = C.est + "66"; g.setLineDash([5, 5]);
+      g.beginPath(); g.arc(x, y, Math.min(rc.err * scale, 4000), 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
+    }
     g.strokeStyle = C.est; g.lineWidth = 3;
     g.beginPath(); g.arc(x, y, 14, 0, 2 * Math.PI); g.stroke();
     g.lineWidth = 2; g.beginPath(); g.moveTo(x - 20, y); g.lineTo(x + 20, y); g.moveTo(x, y - 20); g.lineTo(x, y + 20); g.stroke();

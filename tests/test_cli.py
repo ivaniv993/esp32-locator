@@ -71,6 +71,15 @@ class CliTest(unittest.TestCase):
         with open(self.cfg, encoding="utf-8") as f:
             return json.load(f)
 
+    def test_add_reuses_freed_name_instead_of_duplicating(self):
+        for mac, x in (("A" * 12, "1"), ("B" * 12, "2")):
+            self.assertEqual(run("--config", self.cfg, "--add", mac, x, "1")[0], 0)
+        self.assertEqual(run("--config", self.cfg, "--remove", "A" * 12)[0], 0)
+        self.assertEqual(run("--config", self.cfg, "--add", "C" * 12, "3", "1")[0], 0)
+        with open(self.cfg, encoding="utf-8") as f:
+            names = {t["mac"]: t["name"] for t in json.load(f)["transmitters"]}
+        self.assertEqual(names, {"B" * 12: "B", "C" * 12: "A"})       # раніше новий теж ставав «B»
+
     def test_field_mode_add_geo_and_list(self):
         self.write_cfg(mode="field")
         lat, lon = GeoFrame(50.4501, 30.5234, 90).to_latlon(12.0, 34.0)
