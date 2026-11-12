@@ -170,6 +170,23 @@ class LocatorMinBeaconsTest(unittest.TestCase):
         self.assertAlmostEqual(self.loc.pos[0], b[0], places=1)   # одразу b, а не точка між a і b
         self.assertAlmostEqual(self.loc.pos[1], b[1], places=1)
 
+    def test_moving_a_beacon_restarts_smoothing(self):
+        for k in range(10):                       # положення встановилось
+            self.feed((30.0, 25.0), k * 0.5)
+            self.loc.update(now=k * 0.5)
+            self.assertFalse(self.loc.moved)
+        # координати маяка 3 виправили (екран, сторінка чи API) — розв’язок за тими самими пакетами інший
+        self.cfg["transmitters"][2]["y"] = 40.0
+        self.loc.update(now=4.6)
+        self.assertTrue(self.loc.moved)
+        fresh = Locator(self.cfg, self.readings)  # що дав би розв’язок без жодної історії
+        fresh.update(now=4.6)
+        self.assertGreater(math.hypot(fresh.pos[0] - 30.0, fresh.pos[1] - 25.0), 1.0)
+        self.assertAlmostEqual(self.loc.pos[0], fresh.pos[0], places=6)   # без «доїжджання» від старої точки
+        self.assertAlmostEqual(self.loc.pos[1], fresh.pos[1], places=6)
+        self.loc.update(now=4.8)
+        self.assertFalse(self.loc.moved)
+
 
 class MetricsTest(unittest.TestCase):
     def test_percentile(self):

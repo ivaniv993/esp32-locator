@@ -96,7 +96,9 @@ MIN_BEACONS = 3       # менше маяків — положення не ви
 class Locator:
     """Об’єднує виміри, розв’язок і згладжування.
     Положення рахується, лише коли чути щонайменше MIN_BEACONS маяків; інакше pos = None.
-    Після такої перерви перше положення береться як є, без згладжування від старої точки."""
+    Після такої перерви перше положення береться як є, без згладжування від старої точки.
+    Так само, коли змінились координати маяків (перетягнули на екрані, змінили на сторінці чи через API,
+    у бойовому режимі зсунулась сітка): старе згладжене положення пораховане за іншими координатами."""
 
     def __init__(self, cfg, readings):
         self.cfg, self.readings = cfg, readings
@@ -106,8 +108,17 @@ class Locator:
         self.rejected = set()  # маяки (mac), відкинуті як неузгоджені з рештою
         self.unknown = []
         self.heard = 0
+        self.moved = False   # на цьому кроці координати маяків змінились — згладжування почалось заново
+        self._layout = self._beacon_layout()
+
+    def _beacon_layout(self):
+        return tuple((t["mac"], t["x"], t["y"]) for t in self.cfg["transmitters"])
 
     def update(self, now=None):
+        layout = self._beacon_layout()
+        self.moved = layout != self._layout
+        if self.moved:
+            self._layout, self.pos = layout, None
         snap = self.readings.snapshot(now)
         known = {t["mac"] for t in self.cfg["transmitters"]}
         pts, used, rows = [], [], []

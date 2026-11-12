@@ -101,7 +101,6 @@ class WebState:
         self._json = b"{}"
         self._geo_src = object()
         self._frame = None
-        self._reset_locator = False
         self._rate = (time.monotonic(), readings.total, 0.0)
 
     @property
@@ -136,9 +135,8 @@ class WebState:
     def on_update(self, loc):
         """Викликається після кожного Locator.update(); готує JSON для GET /api/state."""
         with self.lock:
-            if self._reset_locator:                       # координати маяків змінились — старе згладжене
-                loc.pos, self._reset_locator = None, False  # положення в іншій сітці
-                self.trail.clear()
+            if getattr(loc, "moved", False):              # координати маяків змінились — Locator почав
+                self.trail.clear()                        # згладжування заново, старий слід — в іншій сітці
             self.feed.update(self.cfg["transmitters"])
             self._cal_tick()
             frame = self.frame()
@@ -228,13 +226,10 @@ class WebState:
                     apply_field(trial)
                 except ValueError as e:
                     raise EditError(str(e)) from None
-            moved = self.field and trial.get("geo") != self.cfg.get("geo")
             self.cfg["transmitters"] = trial["transmitters"]
             if self.field:
                 self.cfg["area"], self.cfg["geo"] = trial["area"], trial["geo"]
             save_config(self.cfg_path, self.cfg)
-            if moved:
-                self._reset_locator = True
             warning = field_spread_warning(self.cfg) if self.field else None
             return {"ok": True, "message": message, "warning": warning}
 

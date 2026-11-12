@@ -173,6 +173,8 @@ def run_gui(cfg, cfg_path, readings, reader, truth=None, banner=None, on_update=
         if now - last_calc >= 0.2:
             last_calc = now
             loc.update()
+            if loc.moved:                    # маяк перенесли (тут, на сторінці чи через API)
+                trail.clear()
             if on_update:
                 on_update(loc)
             if loc.pos:
