@@ -10,6 +10,7 @@
 й у config.json не зберігаються.
 """
 import json
+import math
 import os
 
 from .geo import check_latlon, field_frame, frame_from_config
@@ -59,18 +60,26 @@ def load_config(path):
         save_config(path, DEFAULT_CONFIG)
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
+    if not isinstance(cfg, dict):
+        raise ValueError("config.json має бути об’єктом JSON { … }")
     merged = json.loads(json.dumps(DEFAULT_CONFIG))
     merged.update(cfg)
     merged["radio"] = {**DEFAULT_CONFIG["radio"], **cfg.get("radio", {})}
     merged["mavlink"] = {**DEFAULT_CONFIG["mavlink"], **cfg.get("mavlink", {})}
     merged["web"] = {**DEFAULT_CONFIG["web"], **cfg.get("web", {})}
     merged["outliers"] = {**DEFAULT_CONFIG["outliers"], **cfg.get("outliers", {})}
-    if "pl_1m" not in merged["signal"]:
+    signal = cfg.get("signal")
+    if signal is not None and not isinstance(signal, dict):
+        raise ValueError('signal має бути об’єктом {"pl_1m": …, "pl_10m": …}')
+    if signal and "pl_1m" not in signal and "pl_10m" not in signal:
         # старий формат (сила 0–1000) — переходимо на модель в децибелах
         merged["signal"] = dict(DEFAULT_CONFIG["signal"])
         merged["window_sec"] = max(float(merged.get("window_sec", 3.0)), 3.0)
         save_config(path, merged)
         print("config.json оновлено під LoRa-маяки. Відкалібруйте pl_1m і pl_10m (--calibrate).")
+    else:                                          # бракує pl_1m чи pl_10m — значення за замовчуванням
+        merged["signal"] = {**DEFAULT_CONFIG["signal"], **(signal or {})}
+    check_algorithm(merged)
     for t in merged["transmitters"]:
         t["mac"] = norm_mac(t["mac"]) or t["mac"]
         if "pl_offset" in t:
@@ -92,6 +101,31 @@ def load_config(path):
             t["x"], t["y"] = float(t["x"]), float(t["y"])
         merged["geo"] = None
     return merged
+
+
+def _number(key, value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError(f"{key} має бути числом, а не {value!r}")
+    return float(value)
+
+
+def check_algorithm(cfg):
+    """Параметри моделі сигналу й згладжування: числа в межах, з якими алгоритм має сенс."""
+    sig = cfg["signal"]
+    p1 = _number("signal.pl_1m", sig["pl_1m"])
+    p10 = _number("signal.pl_10m", sig["pl_10m"])
+    if p10 <= p1:
+        raise ValueError(f"signal.pl_10m ({p10:g} дБ) має бути більшим за pl_1m ({p1:g} дБ): "
+                         f"на 10 м сигнал слабший, ніж на 1 м. Відкалібруйте або поверніть значення за замовчуванням "
+                         f"({DEFAULT_CONFIG['signal']['pl_1m']:g} і {DEFAULT_CONFIG['signal']['pl_10m']:g})")
+    sig["pl_1m"], sig["pl_10m"] = p1, p10
+    window = _number("window_sec", cfg["window_sec"])
+    if window <= 0:
+        raise ValueError("window_sec має бути більшим за 0 (секунди усереднення)")
+    smoothing = _number("smoothing", cfg["smoothing"])
+    if not 0 < smoothing <= 1:
+        raise ValueError("smoothing має бути від 0 (не включно) до 1: 1 — без згладжування, менше — плавніше")
+    cfg["window_sec"], cfg["smoothing"] = window, smoothing
 
 
 def apply_field(cfg):
