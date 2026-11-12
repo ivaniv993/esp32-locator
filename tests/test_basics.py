@@ -5,7 +5,10 @@ import unittest
 from esp32_locator.metrics import bias, percentile, spread, summarize
 from esp32_locator.protocol import norm_mac, parse_line
 from esp32_locator.readings import Readings
-from esp32_locator.solver import Locator, distance_from_loss, solve, solve_consistent
+import random
+
+from esp32_locator.solver import (Locator, check_geometry, distance_from_loss, error_estimate, solve,
+                                  solve_consistent)
 
 from .synthetic import default_cfg
 
@@ -186,6 +189,71 @@ class LocatorMinBeaconsTest(unittest.TestCase):
         self.assertAlmostEqual(self.loc.pos[1], fresh.pos[1], places=6)
         self.loc.update(now=4.8)
         self.assertFalse(self.loc.moved)
+
+
+class GeometryTest(unittest.TestCase):
+    """Перевірка розташування маяків: дзеркальне положення й оцінка похибки."""
+    TRUTH = (5.0, 4.0)
+
+    def locator(self, beacons, truth=TRUTH, sigma=0.0, rnd=None):
+        cfg = default_cfg()
+        cfg["area"] = {"width": 60, "height": 60}
+        cfg["transmitters"] = [{"name": str(i), "mac": f"{i + 1:012X}", "x": float(x), "y": float(y)}
+                               for i, (x, y) in enumerate(beacons)]
+        readings = Readings(3.0)
+        for t in cfg["transmitters"]:
+            d = max(math.hypot(truth[0] - t["x"], truth[1] - t["y"]), 0.5)
+            loss = 40.0 + SLOPE * math.log10(d) + (rnd.gauss(0, sigma) if rnd else 0.0)
+            readings.add(t["mac"], 14.0 - loss, 8.0, 14.0, ts=0.0)
+        loc = Locator(cfg, readings)
+        loc.update(now=0.5)
+        return loc
+
+    def test_beacons_on_one_line_give_mirror_warning(self):
+        # раніше: з (0;0), (5;0), (10;0) розв’язок застрягав на лінії — (7,25; 0), а з (5; 0,5) замість
+        # середнього маяка — давав дзеркальну точку (5; −3,2) без жодного попередження
+        for beacons, mirror in (([(0, 0), (5, 0), (10, 0)], (5.0, -4.0)), ([(0, 0), (5, 0.5), (10, 0)], (5.0, -3.16))):
+            loc = self.locator(beacons)
+            found = {tuple(round(v, 1) for v in loc.pos), tuple(round(v, 1) for v in loc.alt)}
+            self.assertEqual(found, {self.TRUTH, tuple(round(v, 1) for v in mirror)}, beacons)
+            self.assertTrue(loc.warnings)
+            self.assertIn("одній лінії", loc.warnings[0])
+            self.assertGreaterEqual(loc.err, math.hypot(loc.pos[0] - loc.alt[0], loc.pos[1] - loc.alt[1]) - 1e-6)
+
+    def test_mirror_choice_follows_previous_position(self):
+        pts = exact(self.TRUTH, [(0, 0), (5, 0.5), (10, 0)])
+        for prefer in ((5.0, 3.0), (5.0, -3.0)):
+            x, y, alt = check_geometry(5.0, 4.0, pts, SLOPE, 4.0, prefer=prefer)
+            self.assertIsNotNone(alt)
+            self.assertEqual(y > 0, prefer[1] > 0, prefer)
+
+    def test_spread_beacons_give_no_warning(self):
+        for beacons in ([(0, 0), (10, 0), (0, 8), (10, 8)], [(0, 0), (10, 0), (5, 8)]):
+            loc = self.locator(beacons)
+            self.assertIsNone(loc.alt)
+            self.assertEqual(loc.warnings, [])
+            self.assertLess(loc.hdop, 1.5)
+            self.assertAlmostEqual(loc.pos[0], self.TRUTH[0], places=3)
+
+    def test_error_estimate(self):
+        pts = exact((5.0, 4.0), [(0, 0), (10, 0), (0, 8), (10, 8)])
+        err, hdop = error_estimate(5.0, 4.0, pts, SLOPE, 4.0)
+        # 4 маяки на 6,4 м: σ_d = 6,4 · ln10 / 27 · 4 ≈ 2,2 м; HᵀH ≈ 2·I → похибка ≈ σ_d
+        self.assertAlmostEqual(err, 6.403 * math.log(10) / SLOPE * 4.0, delta=0.1)
+        self.assertAlmostEqual(hdop, 1.0, delta=0.05)
+        self.assertAlmostEqual(error_estimate(5.0, 4.0, pts, SLOPE, 8.0)[0], 2 * err, places=6)
+        # приймач на продовженні лінії маяків: упоперек неї положення не визначене
+        err, hdop = error_estimate(20.0, 0.0, exact((20.0, 0.0), [(0, 0), (5, 0), (10, 0)]), SLOPE, 4.0)
+        self.assertEqual((err, hdop), (math.inf, math.inf))
+
+    def test_error_estimate_matches_real_errors(self):
+        # з шумом, рівним sigma_db, справжня похибка не більша за оцінку приблизно в 2 випадках з 3
+        rnd, inside, n = random.Random(7), 0, 300
+        for _ in range(n):
+            truth = (rnd.uniform(0, 10), rnd.uniform(0, 8))
+            loc = self.locator([(0, 0), (10, 0), (0, 8), (10, 8)], truth, sigma=4.0, rnd=rnd)
+            inside += math.hypot(loc.pos[0] - truth[0], loc.pos[1] - truth[1]) <= loc.err
+        self.assertTrue(0.5 <= inside / n <= 0.85, inside / n)
 
 
 class MetricsTest(unittest.TestCase):

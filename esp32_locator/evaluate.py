@@ -34,6 +34,14 @@ class Result:
     truths: list = None    # приймач носили: [(x, y)] за GPS телефона для кожної оцінки
     lag: tuple = None      # приймач носили: (затримка, с; середня похибка, м) — найкращий збіг із GPS
     gps_acc: float = None  # медіанна точність GPS телефона, м
+    ests: list = None      # оцінка похибки (м, може бути inf) для кожної оцінки положення
+    ambiguous: int = 0     # скільки оцінок мали другий можливий розв’язок (маяки майже на одній лінії)
+
+    def est_coverage(self):
+        """Частка кроків, де справжня похибка не більша за оцінку похибки (None — немає даних)."""
+        if not self.ests:
+            return None
+        return sum(e <= est for e, est in zip(self.errors, self.ests)) / len(self.ests)
 
     @property
     def errors(self):
@@ -82,7 +90,7 @@ def evaluate_session(session, cfg, step=STEP):
         if got:
             events.append((t, got))
 
-    fixes, truths, times, ticks, i, k = [], [], [], 0, 0, 0
+    fixes, truths, times, ests, ticks, i, k, ambiguous = [], [], [], [], 0, 0, 0, 0
     while k * step <= session.duration + 1e-9:
         now, k = k * step, k + 1
         while i < len(events) and events[i][0] <= now:
@@ -99,11 +107,13 @@ def evaluate_session(session, cfg, step=STEP):
             fixes.append(locator.pos)
             truths.append(truth)
             times.append(now)
+            ests.append(locator.err)
+            ambiguous += locator.alt is not None
     name = os.path.basename(session.path)
     if not session.moving:
-        return Result(name, session.truth, session.duration, ticks, fixes, session.sf)
+        return Result(name, session.truth, session.duration, ticks, fixes, session.sf, ests=ests, ambiguous=ambiguous)
     return Result(name, None, session.duration, ticks, fixes, session.sf, truths=truths,
-                  lag=best_lag(session, times, fixes), gps_acc=session.gps_accuracy())
+                  lag=best_lag(session, times, fixes), gps_acc=session.gps_accuracy(), ests=ests, ambiguous=ambiguous)
 
 
 def collect_paths(args):
@@ -190,6 +200,13 @@ def format_report(results, cfg):
     lines += [_row(r.name, r.metrics()) for r in results]
     if len(results) > 1:
         lines += ["-" * len(HEADER), _row(f"Разом ({len(results)})", {**total_metrics(results), "duration": sum(r.duration for r in results)}, extra=False)]
+    est = [(r.name, r.est_coverage(), r.ambiguous / len(r.fixes)) for r in results if r.fixes]
+    if est:
+        lines += ["", "Оцінка похибки (accuracy.sigma_db = "
+                  f"{float((cfg.get('accuracy') or {}).get('sigma_db', 4.0)):g} дБ): у скількох кроках справжня похибка "
+                  "не більша за оцінку. Очікується близько 65 %: набагато менше — збільште sigma_db, більше — зменште."]
+        lines += [f"  {name[:28]:28} {cov * 100:4.0f} %" + (f"   дзеркальне положення можливе в {amb * 100:.0f} % кроків"
+                                                            if amb else "") for name, cov, amb in est]
     if len({r.sf for r in results}) > 1:
         lines += ["", "Увага: записи зроблено з різним SF — різниця в похибці може бути через радіо, а не через алгоритм."]
     moving = [r for r in results if r.truth is None]

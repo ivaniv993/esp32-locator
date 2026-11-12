@@ -42,6 +42,10 @@ DEFAULT_CONFIG = {
     # відкидання маяка, що не узгоджується з рештою (працює з 4 маяків): поріг розбіжності, дБ.
     # Часто відкидаються справні маяки — збільште; підроблений чи затінений маяк не ловиться — зменште
     "outliers": {"enabled": True, "max_db": 12.0},
+    # оцінка похибки й попередження про погане розташування маяків (solver.error_estimate):
+    # sigma_db — наскільки втрати маяка зазвичай відхиляються від моделі (rms калібрування на веб-сторінці);
+    # max_hdop — більше — попередження, що маяки стоять погано відносно приймача
+    "accuracy": {"sigma_db": 4.0, "max_hdop": 3.0},
     "fullscreen": False,
     "recordings_dir": "auto",                      # куди --record пише сесії (auto — recordings/ у репо)
     # передача положення в ArduPilot (--mavlink ПОРТ, лише бойовий режим): швидкість порту, стала висота
@@ -68,6 +72,7 @@ def load_config(path):
     merged["mavlink"] = {**DEFAULT_CONFIG["mavlink"], **cfg.get("mavlink", {})}
     merged["web"] = {**DEFAULT_CONFIG["web"], **cfg.get("web", {})}
     merged["outliers"] = {**DEFAULT_CONFIG["outliers"], **cfg.get("outliers", {})}
+    merged["accuracy"] = {**DEFAULT_CONFIG["accuracy"], **cfg.get("accuracy", {})}
     signal = cfg.get("signal")
     if signal is not None and not isinstance(signal, dict):
         raise ValueError('signal має бути об’єктом {"pl_1m": …, "pl_10m": …}')
@@ -130,6 +135,14 @@ def check_algorithm(cfg):
     if not 0 < smoothing <= 1:
         raise ValueError("smoothing має бути від 0 (не включно) до 1: 1 — без згладжування, менше — плавніше")
     cfg["window_sec"], cfg["smoothing"] = window, smoothing
+    acc = cfg["accuracy"]
+    sigma = _number("accuracy.sigma_db", acc["sigma_db"])
+    if sigma <= 0:
+        raise ValueError("accuracy.sigma_db має бути більшим за 0, дБ")
+    max_hdop = _number("accuracy.max_hdop", acc["max_hdop"])
+    if max_hdop < 1:
+        raise ValueError("accuracy.max_hdop не може бути меншим за 1")
+    acc["sigma_db"], acc["max_hdop"] = sigma, max_hdop
 
 
 def apply_field(cfg):

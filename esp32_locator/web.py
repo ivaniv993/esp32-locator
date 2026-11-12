@@ -161,8 +161,14 @@ class WebState:
 
             receiver = None
             if loc.pos:
+                err, alt = getattr(loc, "err", None), getattr(loc, "alt", None)
                 receiver = {"x": round(loc.pos[0], 2), "y": round(loc.pos[1], 2), "latlon": latlon(*loc.pos),
-                            "rms": None if loc.rms is None else round(loc.rms, 2), "fix": fix}
+                            "rms": None if loc.rms is None else round(loc.rms, 2), "fix": fix,
+                            # оцінка похибки, м; null при fix — маяки положення в якомусь напрямку не визначають
+                            "err": round(err, 2) if err is not None and math.isfinite(err) else None,
+                            "alt": None if alt is None else {"x": round(alt[0], 2), "y": round(alt[1], 2),
+                                                             "latlon": latlon(*alt)},
+                            "warnings": list(getattr(loc, "warnings", []))}
             state = {
                 "mode": self.cfg.get("mode", "local"),
                 "area": self.cfg["area"],

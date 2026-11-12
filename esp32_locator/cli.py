@@ -155,6 +155,9 @@ def run_headless(cfg, readings, source, on_update=None, link=None, extra=None, e
         last = now
         if loc.pos and loc.heard >= 3:
             where = format_latlon(*frame.to_latlon(*loc.pos)) if frame else f"x={loc.pos[0]:.2f} y={loc.pos[1]:.2f} м"
+            where += f" ±{loc.err:.1f} м" if loc.err is not None and loc.err != float("inf") else " (похибка дуже велика)"
+            if loc.alt is not None:
+                where += "  УВАГА: маяки майже на одній лінії, можливе дзеркальне положення"
         else:
             where = f"положення невідоме (чути маяків: {loc.heard})"
         print("  ".join([f"[{source.status}]", where] + ([link.status] if link else []) + ([extra()] if extra else [])))
