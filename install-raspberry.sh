@@ -134,7 +134,7 @@ check_hotspot() {
     phy="$(iw dev "$HOTSPOT_IFACE" info 2>/dev/null | awk '/wiphy/ {print "phy" $2}')"
     if [ -n "$phy" ] && ! iw phy "$phy" info 2>/dev/null | sed -n '/Supported interface modes/,/^\s*[A-Z]/p' | grep -qE '\* AP$'; then
       echo "Wi-Fi модуль $HOTSPOT_IFACE не вміє працювати точкою доступу (немає режиму AP)."
-      echo "Потрібен інший USB Wi-Fi адаптер — перевірка: iw list | grep -A 10 'Supported interface modes'"
+      echo "Перевірка: iw list | grep -A 10 'Supported interface modes'"
       exit 1
     fi
   fi

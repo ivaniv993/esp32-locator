@@ -40,6 +40,8 @@
   button.danger { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
   button.ghost { background: transparent; border: 1px solid var(--major); }
   button:disabled { opacity: .5; }
+  a.btn { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 10px 14px;
+    border-radius: 8px; color: var(--ink); text-decoration: none; border: 1px solid var(--major); }
   details summary { cursor: pointer; color: var(--muted); }
   #log { max-height: 240px; overflow: auto; margin-top: 8px; }
   #log div { white-space: pre; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); }
@@ -82,6 +84,13 @@
     <div id="rec"></div>
     <div id="recinfo" class="small" style="margin-top:8px"></div>
     <div id="rechint" class="small muted" style="margin-top:6px"></div>
+    <details id="files" style="margin-top:12px"><summary class="small">Записи на Pi — скачати</summary>
+      <div id="filelist" style="margin-top:6px"></div>
+      <div class="actions">
+        <a class="btn ghost grow" href="/api/recordings.zip" download>⬇ Усі записи й config.json (zip)</a>
+      </div>
+      <div class="small muted" style="margin-top:6px">config.json у архіві — з калібруванням (без PIN): покладіть його поруч із locator.py, щоб --replay і --evaluate на комп’ютері рахували з тим самим калібруванням.</div>
+    </details>
   </section>
 
   <section>
@@ -693,6 +702,7 @@ async function stopRec() {
   try {
     const res = await post("/api/record/stop", {});
     toast(res.message, 8000);
+    loadFiles();
   } catch (e) { toast(e.message, 6000); }
   stopTrack(); rec.owner = ""; store.set("rec", ""); rec.queue = [];
 }
@@ -743,6 +753,27 @@ async function sendGps() {
   } catch (e) { rec.sendErr = e.message; }
   finally { rec.sending = false; }
 }
+
+// ------------------------------------------------------------ записи на Pi: список і завантаження
+async function loadFiles() {
+  if (!$("files").open) return;
+  try {
+    const r = await fetch("/api/recordings", { cache: "no-store" });
+    const list = (await r.json()).recordings || [];
+    const kb = n => n < 1024 * 1024 ? `${fmt(n / 1024, 0)} КБ` : `${fmt(n / 1024 / 1024)} МБ`;
+    $("filelist").innerHTML = list.length ? list.map(f => `
+      <div class="row">
+        <div class="grow">
+          <div class="mono">${esc(f.name)}</div>
+          <div class="small muted">${f.started_at ? esc(f.started_at.replace("T", " ")) + " · " : ""}${kb(f.size)}`
+          + `${f.moving ? " · з GPS телефона" : ""}${f.note ? " · " + esc(f.note) : ""}`
+          + `${f.active ? ' · <span class="err">● пишеться</span>' : ""}</div>
+        </div>
+        <a class="btn ghost" href="/api/recordings/${encodeURIComponent(f.name)}" download aria-label="Скачати ${esc(f.name)}">⬇</a>
+      </div>`).join("") : '<div class="small muted">Записів ще немає.</div>';
+  } catch (e) { $("filelist").innerHTML = '<div class="small err">Не вдалося отримати список записів.</div>'; }
+}
+$("files").addEventListener("toggle", loadFiles);
 
 poll();
 </script>

@@ -3,8 +3,12 @@ import json
 import math
 import os
 import tempfile
+import io
 import types
 import unittest
+import urllib.error
+import urllib.request
+import zipfile
 from unittest import mock
 
 from esp32_locator.config import load_config
@@ -12,7 +16,7 @@ from esp32_locator.evaluate import evaluate_session, format_report
 from esp32_locator.geo import GeoFrame, frame_from_config
 from esp32_locator.readings import Readings
 from esp32_locator.session import FORMAT_VERSION, Recorder, Session, describe, load_session
-from esp32_locator.web import EditError, WebState
+from esp32_locator.web import EditError, WebState, start_server
 
 from .synthetic import default_cfg
 
@@ -183,6 +187,53 @@ class RecorderTest(unittest.TestCase):
         viewer = WebState(self.cfg, None, self.readings, types.SimpleNamespace(status="ok"))
         with self.assertRaises(EditError):
             viewer.shutdown({})
+
+    def test_download_recordings(self):
+        server = start_server(self.ws, 0, host="127.0.0.1")
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        base = f"http://127.0.0.1:{server.server_address[1]}"
+
+        def get(path):
+            try:
+                with urllib.request.urlopen(base + path, timeout=5) as r:
+                    return r.status, r.headers, r.read()
+            except urllib.error.HTTPError as e:
+                return e.code, e.headers, e.read()
+
+        self.assertEqual(json.loads(get("/api/recordings")[2]), {"recordings": []})
+        self.ws.record_start({"pin": "1234", "note": "перший"})
+        self.recorder.write_rx("AAAAAAAAAAAA,-60.0,8.0,14")
+        self.ws.record_stop({"pin": "1234"})
+        self.ws.record_start({"pin": "1234"})                       # другий ще пишеться
+        self.recorder.write_rx("BBBBBBBBBBBB,-61.0,8.0,14")
+        with open(os.path.join(self.dir, "notes.txt"), "w") as f:   # сторонні файли не показуються
+            f.write("x")
+
+        files = json.loads(get("/api/recordings")[2])["recordings"]
+        self.assertEqual(len(files), 2)
+        active = [f for f in files if f["active"]]
+        done = [f for f in files if not f["active"]][0]
+        self.assertEqual(len(active), 1)
+        self.assertEqual((done["note"], done["moving"]), ("перший", True))
+        self.assertGreater(done["size"], 0)
+
+        code, headers, body = get("/api/recordings/" + done["name"])
+        self.assertEqual(code, 200)
+        self.assertIn(f'filename="{done["name"]}"', headers["Content-Disposition"])
+        self.assertIn(b"AAAAAAAAAAAA", body)
+        for bad in ("notes.txt", "..%2Fconfig.json", "%2E%2E%2Fconfig.json", "x.jsonl", "", "%2Fetc%2Fpasswd"):
+            self.assertEqual(get("/api/recordings/" + bad)[0], 404, bad)
+
+        code, headers, body = get("/api/recordings.zip")
+        self.assertEqual((code, headers["Content-Type"]), (200, "application/zip"))
+        with zipfile.ZipFile(io.BytesIO(body)) as z:
+            names = sorted(z.namelist())
+            self.assertEqual(names, sorted(["config.json"] + ["recordings/" + f["name"] for f in files]))
+            cfg = json.loads(z.read("config.json"))
+        self.assertEqual(cfg["mode"], "field")
+        self.assertNotIn("pin", cfg["web"])                          # PIN сторінки в архів не потрапляє
+        self.recorder.stop()
 
     def test_no_recorder_in_replay(self):
         viewer = WebState(self.cfg, None, self.readings, types.SimpleNamespace(status="ok"))

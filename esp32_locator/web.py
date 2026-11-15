@@ -14,9 +14,11 @@
 точки рахується за годинником Pi, тож годинник телефона на це не впливає.
 """
 import hmac
+import io
 import json
 import math
 import os
+import re
 import socket
 import ssl
 import shutil
@@ -25,6 +27,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
+import zipfile
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -42,6 +46,8 @@ LOG_ROWS = 40
 MAX_GPS_POINTS = 60          # точок GPS в одному запиті (телефон надсилає пачками, якщо зв’язок пропадав)
 MAX_GPS_AGE = 600.0          # с: старіші точки (телефон довго був без зв’язку) не пишемо
 DEFAULT_N10 = DEFAULT_CONFIG["signal"]["pl_10m"] - DEFAULT_CONFIG["signal"]["pl_1m"]
+RECORDING_NAME = re.compile(r"^[A-Za-z0-9_.-]+\.jsonl$")   # лише назви файлів записів, без шляхів
+MAX_HEADER = 1 << 20         # байт: довше перший рядок запису не читаємо (для списку)
 
 
 class EditError(ValueError):
@@ -489,6 +495,63 @@ class WebState:
                     self._set_phone(*frame.to_local(lat, lon), acc, now - age)
         return {"ok": True, "recording": self.recording, "saved": saved}
 
+    # ------------------------------------------------------------ завантаження записів
+    # Записи з папки Recorder можна скачати на телефон чи ноутбук: по одному або всі разом архівом.
+    # Без PIN, як і перегляд мапи: це лише читання. В архів кладеться й config.json (калібрування
+    # потрібне, щоб відтворити записи на комп’ютері), але без PIN сторінки.
+    def _recordings_dir(self):
+        return self.recorder.directory if self.recorder else None
+
+    def recordings(self):
+        """[{name, size, started_at, note, moving, active}] від найновіших; [] — записів немає або не той режим."""
+        d = self._recordings_dir()
+        if not d or not os.path.isdir(d):
+            return []
+        w = self.recorder.writer
+        active = os.path.basename(w.path) if w else None
+        out = []
+        for name in sorted(os.listdir(d), reverse=True):
+            path = os.path.join(d, name)
+            if not RECORDING_NAME.match(name) or not os.path.isfile(path):
+                continue
+            header = {}
+            try:
+                with open(path, encoding="utf-8") as f:
+                    header = json.loads(f.readline(MAX_HEADER))
+            except (OSError, ValueError):
+                pass                                      # зіпсований заголовок — файл однаково можна скачати
+            if not isinstance(header, dict):
+                header = {}
+            out.append({"name": name, "size": os.path.getsize(path), "started_at": header.get("started_at"),
+                        "note": header.get("note") or "", "moving": header.get("receiver_truth", 0) is None,
+                        "active": name == active})
+        return out
+
+    def recording_file(self, name):
+        """Шлях до запису за назвою або None. Лише файли з папки записів: назва без «/» і «..»."""
+        d = self._recordings_dir()
+        if not d or not RECORDING_NAME.match(name) or name.startswith("."):
+            return None
+        path = os.path.join(d, name)
+        return path if os.path.isfile(path) else None
+
+    def recordings_zip(self):
+        """Усі записи й config.json (без PIN) одним zip-архівом, bytes."""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+            for r in self.recordings():
+                path = self.recording_file(r["name"])
+                if path:
+                    with open(path, "rb") as f:          # файл, що зараз пишеться, — як є на цю мить
+                        z.writestr("recordings/" + r["name"], f.read())
+            if self.cfg_path and os.path.isfile(self.cfg_path):
+                with open(self.cfg_path, encoding="utf-8") as f:
+                    cfg = json.load(f)
+                if isinstance(cfg.get("web"), dict):
+                    cfg["web"].pop("pin", None)
+                z.writestr("config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
+        return buf.getvalue()
+
 
 # ---------------------------------------------------------------- HTTP
 def make_handler(state):
@@ -499,9 +562,11 @@ def make_handler(state):
         def log_message(self, fmt, *args):          # без журналу кожного запиту в консоль
             pass
 
-        def _send(self, code, body, ctype="application/json; charset=utf-8"):
+        def _send(self, code, body, ctype="application/json; charset=utf-8", filename=None):
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            if filename:                            # браузер зберігає файл, а не відкриває його
+                self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -518,6 +583,18 @@ def make_handler(state):
                     self._send(200, f.read(), "text/html; charset=utf-8")
             elif path == "/api/state":
                 self._send(200, state.state_json())
+            elif path == "/api/recordings":
+                self._json(200, {"recordings": state.recordings()})
+            elif path == "/api/recordings.zip":
+                stamp = time.strftime("%Y-%m-%d_%H-%M")
+                self._send(200, state.recordings_zip(), "application/zip", f"esp32-locator-{stamp}.zip")
+            elif path.startswith("/api/recordings/"):
+                name = urllib.parse.unquote(path[len("/api/recordings/"):])
+                file = state.recording_file(name)
+                if not file:
+                    return self._json(404, {"error": "Такого запису немає"})
+                with open(file, "rb") as f:
+                    self._send(200, f.read(), "application/octet-stream", name)
             else:
                 self._json(404, {"error": "Не знайдено"})
 
