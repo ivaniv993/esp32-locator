@@ -222,6 +222,9 @@ class RecorderTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn(f'filename="{done["name"]}"', headers["Content-Disposition"])
         self.assertIn(b"AAAAAAAAAAAA", body)
+        code, headers, view = get("/api/recordings/" + done["name"] + "?view=1")      # перегляд у браузері
+        self.assertEqual((code, headers["Content-Type"], view), (200, "text/plain; charset=utf-8", body))
+        self.assertIsNone(headers["Content-Disposition"])
         for bad in ("notes.txt", "..%2Fconfig.json", "%2E%2E%2Fconfig.json", "x.jsonl", "", "%2Fetc%2Fpasswd"):
             self.assertEqual(get("/api/recordings/" + bad)[0], 404, bad)
 

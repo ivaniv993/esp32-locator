@@ -594,7 +594,11 @@ def make_handler(state):
                 if not file:
                     return self._json(404, {"error": "Такого запису немає"})
                 with open(file, "rb") as f:
-                    self._send(200, f.read(), "application/octet-stream", name)
+                    body = f.read()
+                if "view=1" in self.path.split("?", 1)[-1].split("&"):   # переглянути як текст у браузері
+                    self._send(200, body, "text/plain; charset=utf-8")
+                else:
+                    self._send(200, body, "application/octet-stream", name)
             else:
                 self._json(404, {"error": "Не знайдено"})
 

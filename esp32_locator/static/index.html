@@ -87,7 +87,7 @@
     <details id="files" style="margin-top:12px"><summary class="small">Записи на Pi — скачати</summary>
       <div id="filelist" style="margin-top:6px"></div>
       <div class="actions">
-        <a class="btn ghost grow" href="/api/recordings.zip" download>⬇ Усі записи й config.json (zip)</a>
+        <a class="btn ghost grow" href="/api/recordings.zip" data-dl="zip">⬇ Усі записи й config.json (zip)</a>
       </div>
       <div class="small muted" style="margin-top:6px">config.json у архіві — з калібруванням (без PIN): покладіть його поруч із locator.py, щоб --replay і --evaluate на комп’ютері рахували з тим самим калібруванням.</div>
     </details>
@@ -769,11 +769,40 @@ async function loadFiles() {
           + `${f.moving ? " · з GPS телефона" : ""}${f.note ? " · " + esc(f.note) : ""}`
           + `${f.active ? ' · <span class="err">● пишеться</span>' : ""}</div>
         </div>
-        <a class="btn ghost" href="/api/recordings/${encodeURIComponent(f.name)}" download aria-label="Скачати ${esc(f.name)}">⬇</a>
+        <a class="btn ghost" href="/api/recordings/${encodeURIComponent(f.name)}?view=1" target="_blank" rel="noopener"
+           aria-label="Переглянути ${esc(f.name)}">👁</a>
+        <a class="btn ghost" href="/api/recordings/${encodeURIComponent(f.name)}" data-dl="${esc(f.name)}"
+           aria-label="Скачати ${esc(f.name)}">⬇</a>
       </div>`).join("") : '<div class="small muted">Записів ще немає.</div>';
   } catch (e) { $("filelist").innerHTML = '<div class="small err">Не вдалося отримати список записів.</div>'; }
 }
 $("files").addEventListener("toggle", loadFiles);
+
+// Скачування — через саму сторінку (fetch → файл у пам’яті → збереження), а не звичайним посиланням:
+// Chrome на Android віддає звичайні скачування окремому завантажувачу, який не довіряє самопідписаному
+// сертифікату Pi, і файл обривається з помилкою. Сторінка сертифікату вже довіряє.
+document.addEventListener("click", async ev => {
+  const a = ev.target.closest("a[data-dl]");
+  if (!a) return;
+  ev.preventDefault();
+  if (a.dataset.busy) return;
+  const label = a.textContent;
+  a.dataset.busy = "1"; a.textContent = "…";
+  try {
+    const r = await fetch(a.href, { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status === 404 ? "запису вже немає" : `помилка ${r.status}`);
+    const name = a.dataset.dl === "zip"
+      ? (/filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "") || [, "esp32-locator.zip"])[1]
+      : a.dataset.dl;
+    // .jsonl — звичайний текст: з типом text/plain телефон зможе відкрити його текстовим переглядачем
+    const blob = new Blob([await r.arrayBuffer()], { type: name.endsWith(".zip") ? "application/zip" : "text/plain" });
+    const url = URL.createObjectURL(blob), tmp = document.createElement("a");
+    tmp.href = url; tmp.download = name; document.body.appendChild(tmp); tmp.click(); tmp.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    toast(`Збережено ${name} (${fmt(blob.size / 1024, 0)} КБ) — у «Завантаженнях» телефона`, 6000);
+  } catch (e) { toast("Не вдалося скачати: " + e.message, 6000); }
+  finally { delete a.dataset.busy; a.textContent = label; }
+});
 
 poll();
 </script>
