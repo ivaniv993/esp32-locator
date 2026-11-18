@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 
+from . import calibration
 from .config import CONFIG_PATH, MODES, field_spread_warning, load_config, next_name, save_config
 from .evaluate import (collect_paths, compare, evaluate_files, format_report, load_baseline,
                        save_baseline)
@@ -326,6 +327,45 @@ def calibrate(cfg):
         pass
 
 
+def calibrate_from(cfg, args):
+    """Модель сигналу за записами, у яких відоме положення приймача (GPS телефона чи --truth).
+    Без --apply лише показує результат; з --apply записує його в config.json."""
+    paths = collect_paths(args.calibrate_from)
+    if not paths:
+        sys.exit("Записів не знайдено.")
+    samples = []
+    for p in paths:
+        try:
+            session = load_session(p)
+        except (OSError, ValueError) as e:
+            sys.exit(f"Помилка: {e}")
+        got = calibration.walk_samples(session, cfg["default_tx_power_dbm"])
+        if got:
+            where = f"{len(got)} пакетів, {min(s['d'] for s in got):.0f}–{max(s['d'] for s in got):.0f} м"
+        elif session.moving and not session.track:
+            where = "пропущено: немає GPS телефона"
+        else:
+            where = "пропущено: немає пакетів з відомою відстанню до маяка"
+        print(f"{os.path.basename(p)}: {where}")
+        samples += got
+    sig = cfg["signal"]
+    result = calibration.fit_walk(samples, sig["pl_10m"] - sig["pl_1m"])
+    if result is None:
+        sys.exit(f"Замало даних: пакетів з відомою відстанню {len(samples)}, потрібно щонайменше "
+                 f"{calibration.MIN_WALK_PACKETS}. Потрібні записи з GPS телефона (кнопка «Запис» на сторінці) "
+                 f"або з --truth.")
+    print("\n" + calibration.format_walk(result, sig))
+    if not args.apply:
+        print("\nconfig.json не змінено. Щоб записати цю модель, додайте --apply.")
+        return
+    offsets, removed = calibration.apply_walk(cfg, result)
+    save_config(args.config, cfg)
+    print(f"\nЗаписано в {args.config}: pl_1m = {result['pl_1m']:g}, pl_10m = {result['pl_10m']:g}."
+          + (f" Прибрано зсуви маяків (pl_offset): {offsets}." if offsets else "")
+          + (f" Прибрано виміри з веб-сторінки: {removed}." if removed else ""))
+    print("Якщо працює служба, перезапустіть її: sudo systemctl restart esp32-locator")
+
+
 def list_ports():
     try:
         from serial.tools import list_ports as lp
@@ -354,6 +394,9 @@ def main():
     g.add_argument("--remove", metavar="ID", help="видалити маяк")
     g.add_argument("--list", action="store_true", help="показати маяки")
     g.add_argument("--calibrate", action="store_true", help="режим калібрування")
+    g.add_argument("--calibrate-from", nargs="+", metavar="FILE",
+                   help="порахувати модель сигналу за записами з відомим положенням приймача (файли або папка)")
+    ap.add_argument("--apply", action="store_true", help="--calibrate-from: записати модель у config.json")
     g.add_argument("--record", action="store_true", help="записати сесію (потрібен --truth X Y)")
     g.add_argument("--replay", metavar="FILE", help="відтворити записану сесію замість приймача")
     g.add_argument("--evaluate", nargs="+", metavar="FILE", help="оцінити алгоритм на записах (файли або папка)")
@@ -395,7 +438,9 @@ def main():
         cfg["serial_port"] = args.port
     field = cfg["mode"] == "field"
     other_command = args.add or args.add_geo or args.remove or args.list or args.ports or args.calibrate \
-        or args.info or args.evaluate or args.mode
+        or args.info or args.evaluate or args.mode or args.calibrate_from
+    if args.apply and not args.calibrate_from:
+        sys.exit("--apply працює лише з --calibrate-from")
     if (args.web is not None or args.web_https) and other_command:
         sys.exit("--web працює зі звичайним режимом, --record або --replay")
     if args.web_https and args.web is None:
@@ -453,6 +498,8 @@ def main():
         list_ports()
     elif args.calibrate:
         calibrate(cfg)
+    elif args.calibrate_from:
+        calibrate_from(cfg, args)
     elif args.record:
         record(cfg, args)
     elif args.replay:

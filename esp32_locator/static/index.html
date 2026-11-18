@@ -96,6 +96,7 @@
   <section>
     <h2>Маяки</h2>
     <div id="beacons"></div>
+    <div id="farwarn" class="small warn" style="display:none; margin-top:8px"></div>
     <div id="unknownbox" style="display:none">
       <h2 style="margin-top:14px" class="warn">Незареєстровані</h2>
       <div id="unknown"></div>
@@ -274,6 +275,13 @@ function render() {
       + (b.rejected ? " · відкинуто: не узгоджується з іншими" : "");
   }
 
+  const far = mapView().far;
+  $("farwarn").style.display = far.length ? "" : "none";
+  $("farwarn").textContent = far.length
+    ? `${far.map(f => `${f.name || f.mac} (за ${f.km >= 10 ? Math.round(f.km) : fmt(f.km)} км)`).join(", ")} — далеко від решти маяків, `
+      + "тож на мапі показано лише стрілкою на краю. Імовірно, це маяк з іншого місця або помилка в координатах: "
+      + "виправте координати («Змінити») або видаліть його."
+    : "";
   $("unknownbox").style.display = S.unknown.length ? "" : "none";
   keyed($("unknown"), JSON.stringify([ed, S.mode, S.unknown.map(u => u.mac)]), () => S.unknown.map(u => `
     <div class="row">
@@ -296,11 +304,42 @@ function render() {
 }
 
 // ------------------------------------------------------------ мапа
+// Тестовий режим: мапа — уся зона area. Бойовий: зона рахується навколо ВСІХ маяків, і один маяк із
+// помилковими координатами (за десятки км) стиснув би поле в точку в кутку. Тому мапа показує основну
+// групу маяків (найбільшу, де всі в межах CLUSTER_M один від одного) і GPS телефона поруч із нею;
+// далекі маяки — стрілкою на краю мапи з відстанню, і попередженням під списком маяків.
+const CLUSTER_M = 2000;
+const NEAR_M = 500;          // м від центру поля: ближче — положення приймача розширює мапу
+const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
+
+function mapView() {
+  const aw = Math.max(S.area.width, 1), ah = Math.max(S.area.height, 1);
+  if (!field() || !S.beacons.length) return { x0: 0, y0: 0, x1: aw, y1: ah, far: [], cx: aw / 2, cy: ah / 2 };
+  let core = [], best = -1;
+  for (const a of S.beacons) {
+    const near = S.beacons.filter(b => dist([a.x, a.y], [b.x, b.y]) <= CLUSTER_M);
+    const score = near.length * 100 + near.filter(b => b.rssi != null).length;   // рівні групи — де чути більше
+    if (score > best) { best = score; core = near; }
+  }
+  const cx = core.reduce((s, b) => s + b.x, 0) / core.length, cy = core.reduce((s, b) => s + b.y, 0) / core.length;
+  const pts = core.map(b => [b.x, b.y]);
+  // GPS телефона і визначене положення — якщо поруч із полем (явно хибне положення за кілометр мапу не розтягує)
+  const ph = phoneShown(), rc = S.receiver;
+  for (const p of ph ? [[ph.x, ph.y], ...S.phone_trail] : []) if (dist(p, [cx, cy]) <= CLUSTER_M) pts.push(p);
+  for (const p of rc && rc.fix ? [[rc.x, rc.y], ...S.trail] : []) if (dist(p, [cx, cy]) <= NEAR_M) pts.push(p);
+  let x0 = Math.min(...pts.map(p => p[0])), x1 = Math.max(...pts.map(p => p[0]));
+  let y0 = Math.min(...pts.map(p => p[1])), y1 = Math.max(...pts.map(p => p[1]));
+  const m = Math.max(10, 0.12 * Math.max(x1 - x0, y1 - y0));
+  return { x0: x0 - m, y0: y0 - m, x1: x1 + m, y1: y1 + m, cx, cy,
+           far: S.beacons.filter(b => !core.includes(b)).map(b => ({ ...b, km: dist([b.x, b.y], [cx, cy]) / 1000 })) };
+}
+
 function draw() {
   const cv = $("map"), dpr = window.devicePixelRatio || 1;
-  if (S) {                                 // висота під пропорції зони: без порожніх смуг над і під мапою
+  const V = S ? mapView() : null;
+  if (V) {                                 // висота під пропорції мапи: без порожніх смуг над і під нею
     const want = Math.round(Math.min(window.innerHeight * 0.7,
-      Math.max(240, cv.clientWidth * Math.max(S.area.height, 1) / Math.max(S.area.width, 1) + 60)));
+      Math.max(240, cv.clientWidth * (V.y1 - V.y0) / (V.x1 - V.x0) + 60)));
     if (Math.abs(cv.clientHeight - want) > 2) cv.style.height = want + "px";
   }
   const W = cv.clientWidth, H = cv.clientHeight;
@@ -310,27 +349,53 @@ function draw() {
   g.clearRect(0, 0, W, H);
   if (!S) return;
   const aw = Math.max(S.area.width, 1), ah = Math.max(S.area.height, 1), pad = 30;
-  const scale = Math.min((W - 2 * pad) / aw, (H - 2 * pad) / ah);
-  const ox = (W - aw * scale) / 2, oy = (H + ah * scale) / 2;
-  geo = { ox, oy, scale, aw, ah };
-  const P = (x, y) => [ox + x * scale, oy - y * scale];
+  const vw = V.x1 - V.x0, vh = V.y1 - V.y0;
+  const scale = Math.min((W - 2 * pad) / vw, (H - 2 * pad) / vh);
+  const ox = (W - vw * scale) / 2, oy = (H + vh * scale) / 2;
+  geo = { ox, oy, scale, aw, ah, vx0: V.x0, vy0: V.y0 };
+  const P = (x, y) => [ox + (x - V.x0) * scale, oy - (y - V.y0) * scale];
+  const inView = (x, y) => [Math.min(V.x1, Math.max(V.x0, x)), Math.min(V.y1, Math.max(V.y0, y))];
+  const PV = (x, y) => P(...inView(x, y));            // поза мапою — на її краю
 
-  const step = scale >= 12 ? 1 : scale >= 3 ? 5 : 10, major = step === 1 ? 5 : step * 2;
+  // крок сітки: найменший «круглий», при якому лінії не густіші ніж раз на ~18 px
+  const step = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000, 5000].find(s => s * scale >= 18) || 10000;
+  const major = step * (String(step)[0] === "5" ? 2 : 5);
   g.font = "11px system-ui, sans-serif"; g.lineWidth = 1;
-  for (let x = 0; x <= aw + 1e-9; x += step) {
+  for (let x = Math.ceil(V.x0 / step) * step; x <= V.x1 + 1e-9; x += step) {
     const m = Math.round(x) % major === 0; g.strokeStyle = m ? C.major : C.grid;
-    g.beginPath(); g.moveTo(...P(x, 0)); g.lineTo(...P(x, ah)); g.stroke();
-    if (m) { g.fillStyle = C.muted; g.textAlign = "center"; g.fillText(Math.round(x), P(x, 0)[0], P(x, 0)[1] + 14); }
+    g.beginPath(); g.moveTo(...P(x, V.y0)); g.lineTo(...P(x, V.y1)); g.stroke();
+    if (m) { g.fillStyle = C.muted; g.textAlign = "center"; g.fillText(Math.round(x), P(x, V.y0)[0], P(x, V.y0)[1] + 14); }
   }
-  for (let y = 0; y <= ah + 1e-9; y += step) {
+  for (let y = Math.ceil(V.y0 / step) * step; y <= V.y1 + 1e-9; y += step) {
     const m = Math.round(y) % major === 0; g.strokeStyle = m ? C.major : C.grid;
-    g.beginPath(); g.moveTo(...P(0, y)); g.lineTo(...P(aw, y)); g.stroke();
-    if (m && y > 0) { g.fillStyle = C.muted; g.textAlign = "right"; g.fillText(Math.round(y), P(0, y)[0] - 5, P(0, y)[1] + 4); }
+    g.beginPath(); g.moveTo(...P(V.x0, y)); g.lineTo(...P(V.x1, y)); g.stroke();
+    if (m) { g.fillStyle = C.muted; g.textAlign = "right"; g.fillText(Math.round(y), P(V.x0, y)[0] - 5, P(V.x0, y)[1] + 4); }
   }
-  g.textAlign = "left"; g.fillStyle = C.muted; g.fillText("м", P(aw, 0)[0] + 14, P(aw, 0)[1] + 14);
+  g.textAlign = "left"; g.fillStyle = C.muted; g.fillText("м", P(V.x1, V.y0)[0] + 6, P(V.x1, V.y0)[1] + 14);
   if (field()) { g.font = "600 13px system-ui, sans-serif"; g.textAlign = "right"; g.fillText("Пн ↑", W - 10, 20); }
 
-  const beacons = S.beacons.map(b => drag && drag.mac === b.mac ? { ...b, x: drag.x, y: drag.y } : b);
+  const arrows = [];                       // далекі маяки: стрілка на краю мапи в їхній бік; в один бік — одна
+  for (const b of V.far) {
+    const dx = b.x - V.cx, dy = b.y - V.cy, k = Math.min(...[dx ? (dx > 0 ? V.x1 - V.cx : V.x0 - V.cx) / dx : Infinity,
+                                                             dy ? (dy > 0 ? V.y1 - V.cy : V.y0 - V.cy) / dy : Infinity]);
+    const [x, y] = P(V.cx + dx * k, V.cy + dy * k);
+    const ex = Math.min(W - 12, Math.max(12, x)), ey = Math.min(H - 12, Math.max(12, y));
+    const same = arrows.find(a => Math.hypot(a.ex - ex, a.ey - ey) < 40);
+    if (same) same.items.push(b); else arrows.push({ ex, ey, a: Math.atan2(-dy, dx), items: [b] });
+  }
+  for (const { ex, ey, a, items } of arrows) {
+    const km = Math.min(...items.map(b => b.km));
+    g.fillStyle = C.warn; g.beginPath();
+    g.moveTo(ex + 9 * Math.cos(a), ey + 9 * Math.sin(a));
+    g.lineTo(ex + 9 * Math.cos(a + 2.5), ey + 9 * Math.sin(a + 2.5));
+    g.lineTo(ex + 9 * Math.cos(a - 2.5), ey + 9 * Math.sin(a - 2.5)); g.fill();
+    g.font = "600 12px system-ui, sans-serif"; g.textAlign = ex > W / 2 ? "right" : "left";
+    g.fillText(`${items.map(b => b.name || b.mac.slice(-5)).join(", ")} · ${km >= 10 ? Math.round(km) : fmt(km)} км`,
+      ex + (ex > W / 2 ? -14 : 14), ey + (ey > H / 2 ? -10 : 18));
+  }
+
+  const beacons = S.beacons.filter(b => !V.far.some(f => f.mac === b.mac))
+    .map(b => drag && drag.mac === b.mac ? { ...b, x: drag.x, y: drag.y } : b);
   g.setLineDash([5, 5]);
   for (const b of beacons) if (b.distance != null) {
     g.strokeStyle = (b.rejected ? C.warn : C.tx) + "88";
@@ -359,7 +424,7 @@ function draw() {
   }
   const ph = phoneShown();
   if (ph) {                                // GPS телефона — фактичне положення, з яким порівнюємо
-    const clamp = p => P(Math.min(aw, Math.max(0, p[0])), Math.min(ah, Math.max(0, p[1])));
+    const clamp = p => PV(p[0], p[1]);
     g.fillStyle = C.truth;
     S.phone_trail.forEach((p, i) => {
       g.globalAlpha = .1 + .4 * i / S.phone_trail.length;
@@ -378,13 +443,13 @@ function draw() {
   }
   const rc = S.receiver;
   if (rc && rc.fix && rc.alt) {                   // другий розв’язок: маяки майже на одній лінії
-    const [x, y] = P(Math.min(aw, Math.max(0, rc.alt.x)), Math.min(ah, Math.max(0, rc.alt.y)));
+    const [x, y] = PV(rc.alt.x, rc.alt.y);
     g.strokeStyle = C.warn; g.fillStyle = C.warn; g.lineWidth = 2; g.setLineDash([4, 4]);
     g.beginPath(); g.arc(x, y, 12, 0, 2 * Math.PI); g.stroke(); g.setLineDash([]); g.lineWidth = 1;
     g.font = "700 15px system-ui, sans-serif"; g.textAlign = "center"; g.fillText("?", x, y + 5);
   }
   if (rc && rc.fix) {
-    const [x, y] = P(Math.min(aw, Math.max(0, rc.x)), Math.min(ah, Math.max(0, rc.y)));
+    const [x, y] = PV(rc.x, rc.y);
     if (rc.err != null && rc.err * scale > 16) {  // оцінка похибки
       g.strokeStyle = C.est + "66"; g.setLineDash([5, 5]);
       g.beginPath(); g.arc(x, y, Math.min(rc.err * scale, 4000), 0, 2 * Math.PI); g.stroke(); g.setLineDash([]);
@@ -393,18 +458,25 @@ function draw() {
     g.beginPath(); g.arc(x, y, 14, 0, 2 * Math.PI); g.stroke();
     g.lineWidth = 2; g.beginPath(); g.moveTo(x - 20, y); g.lineTo(x + 20, y); g.moveTo(x, y - 20); g.lineTo(x, y + 20); g.stroke();
     g.lineWidth = 1;
+    const [ix, iy] = inView(rc.x, rc.y);
+    if (ix !== rc.x || iy !== rc.y) {            // положення за межами мапи — приціл на краю, з відстанню
+      const off = Math.hypot(rc.x - ix, rc.y - iy);
+      g.fillStyle = C.est; g.font = "600 12px system-ui, sans-serif"; g.textAlign = x > W / 2 ? "right" : "left";
+      g.fillText(`поза мапою · ще ${off >= 1000 ? fmt(off / 1000) + " км" : Math.round(off) + " м"}`,
+        x + (x > W / 2 ? -24 : 24), y + (y > H / 2 ? -24 : 32));
+    }
   }
 }
 
 function toWorld(ev) {
   const r = $("map").getBoundingClientRect(), px = ev.clientX - r.left, py = ev.clientY - r.top;
-  const x = (px - geo.ox) / geo.scale, y = (geo.oy - py) / geo.scale;
+  const x = geo.vx0 + (px - geo.ox) / geo.scale, y = geo.vy0 + (geo.oy - py) / geo.scale;
   return { px, py, x: Math.round(Math.min(geo.aw, Math.max(0, x)) * 10) / 10, y: Math.round(Math.min(geo.ah, Math.max(0, y)) * 10) / 10 };
 }
 function beaconAt(px, py) {
   let best = null, bd = 26;                       // радіус із запасом для пальця
   for (const b of S.beacons) {
-    const d = Math.hypot(px - (geo.ox + b.x * geo.scale), py - (geo.oy - b.y * geo.scale));
+    const d = Math.hypot(px - (geo.ox + (b.x - geo.vx0) * geo.scale), py - (geo.oy - (b.y - geo.vy0) * geo.scale));
     if (d <= bd) { best = b; bd = d; }
   }
   return best;
